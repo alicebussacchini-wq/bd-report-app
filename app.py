@@ -167,7 +167,7 @@ if st.session_state["pagina"] == "genera":
         st.caption("📄 Bilancio consolidato")
         bilancio = st.file_uploader("Bilancio PDF completo", type=["pdf"], key="bilancio", label_visibility="collapsed")
         st.caption("📊 Pagine finanziarie (conto economico + stato patrimoniale)")
-        bilancio_finanziario = st.file_uploader("PDF pagine chiave", type=["pdf"], key="bilancio_fin", label_visibility="collapsed")
+       
     with col2:
         st.caption("📈 Export Mergermarket")
         mergermarket = st.file_uploader("Mergermarket", type=["pdf", "csv"], key="merger", label_visibility="collapsed")
