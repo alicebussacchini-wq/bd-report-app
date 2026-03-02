@@ -77,17 +77,42 @@ def estrai_testo_pdf(file):
     for i, pagina in enumerate(reader.pages):
         testo_pagina = pagina.extract_text() or ""
         testo += f"\n--- PAGINA {i+1} ---\n{testo_pagina}"
-    
-    # Se il testo estratto è troppo scarso, usa OCR
-    if len(testo.strip()) < 500:
-        st.info("PDF scansionato rilevato, uso OCR...")
-        immagini = convert_from_bytes(contenuto, poppler_path=POPPLER_PATH, dpi=200)
-        testo = ""
-        for i, img in enumerate(immagini[:15]):
-            testo_ocr = pytesseract.image_to_string(img, lang="ita")
-            testo += f"\n--- PAGINA {i+1} ---\n{testo_ocr}"
-    
-    return testo
+    return testo, contenuto
+
+def analizza_pdf_con_vision(contenuto_pdf, nome_fonte):
+    try:
+        immagini = convert_from_bytes(contenuto_pdf, poppler_path=POPPLER_PATH, dpi=150)
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        testo_completo = ""
+        for i, img in enumerate(immagini[:20]):
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=85)
+            img_b64 = base64.b64encode(buffer.getvalue()).decode()
+            risposta = client.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=2000,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": img_b64
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Sei un analista finanziario. Estrai tutto il testo e i dati numerici visibili in questa pagina di bilancio, mantenendo la struttura originale. Includi tutti i valori finanziari, voci di conto economico e stato patrimoniale."
+                        }
+                    ]
+                }]
+            )
+            testo_completo += f"\n--- PAGINA {i+1} ---\n{risposta.content[0].text}"
+        return testo_completo
+    except Exception as e:
+        return ""
 
 def estrai_testo_url(url):
     try:
@@ -160,6 +185,33 @@ if st.session_state["pagina"] == "genera":
         testo = ""
         for i, p in enumerate(reader.pages):
             testo += f"\n--- PAGINA {i+1} ---\n{p.extract_text() or ''}"
+        
+        # Se testo scarso, usa Claude Vision
+        if len(testo.strip()) < 500:
+            st.info("PDF scansionato rilevato, uso Claude Vision...")
+            try:
+                immagini = convert_from_bytes(contenuto, poppler_path=POPPLER_PATH, dpi=150)
+                client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+                testo = ""
+                for i, img in enumerate(immagini[:20]):
+                    buffer = io.BytesIO()
+                    img.save(buffer, format="JPEG", quality=85)
+                    img_b64 = base64.b64encode(buffer.getvalue()).decode()
+                    risposta = client_vision.messages.create(
+                        model="claude-opus-4-5",
+                        max_tokens=2000,
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+                                {"type": "text", "text": "Estrai tutto il testo e i dati numerici da questa pagina di bilancio, mantenendo la struttura originale."}
+                            ]
+                        }]
+                    )
+                    testo += f"\n--- PAGINA {i+1} ---\n{risposta.content[0].text}"
+            except Exception as e:
+                st.warning(f"Vision non disponibile: {e}")
+        
         testi_documenti["Bilancio Consolidato"] = testo
         documenti_binari[bilancio.name] = contenuto
         st.success("✅ Bilancio caricato")
