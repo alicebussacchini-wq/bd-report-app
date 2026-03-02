@@ -166,12 +166,14 @@ if st.session_state["pagina"] == "genera":
         st.caption("🏛️ Visura Camerale")
         visura = st.file_uploader("Visura PDF", type=["pdf"], key="visura", label_visibility="collapsed")
 
-    def estrai_testo_pdf(file):
-        reader = PyPDF2.PdfReader(io.BytesIO(file.read()))
-        testo = ""
-        for pagina in reader.pages:
-            testo += pagina.extract_text() or ""
-        return testo
+   def estrai_testo_pdf(file):
+    contenuto = file.read()
+    reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
+    testo = ""
+    for i, pagina in enumerate(reader.pages):
+        testo_pagina = pagina.extract_text() or ""
+        testo += f"\n--- PAGINA {i+1} ---\n{testo_pagina}"
+    return testo
 
     def estrai_testo_url(url):
         try:
@@ -225,7 +227,7 @@ if st.session_state["pagina"] == "genera":
             with st.spinner("Claude sta analizzando i documenti..."):
                 testo_completo = ""
                 for fonte, testo in testi_documenti.items():
-                    testo_completo += f"\n\n--- FONTE: {fonte} ---\n{testo[:8000]}"
+                    testo_completo += f"\n\n--- FONTE: {fonte} ---\n{testo[:25000]}"
 
                 prompt = f"""Sei un analista M&A e finance di uno studio legale internazionale.
 Analizza i seguenti documenti relativi all'azienda {nome_azienda} e produci un report strutturato in JSON.
