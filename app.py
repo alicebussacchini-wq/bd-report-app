@@ -362,9 +362,15 @@ elif st.session_state["pagina"] == "archivio":
             </div>
             """, unsafe_allow_html=True)
 
-            col_a, col_b = st.columns([1, 4])
+            col_a, col_b, col_c = st.columns([1, 1, 4])
             with col_a:
                 if st.button("📖 Apri", key=f"apri_{item['cartella']}"):
                     st.session_state["report"] = r
                     st.session_state["pagina"] = "genera"
+                    st.rerun()
+            with col_b:
+                if st.button("🗑️ Elimina", key=f"elimina_{item['cartella']}"):
+                    import shutil
+                    shutil.rmtree(item["percorso"])
+                    st.success("Report eliminato.")
                     st.rerun()
