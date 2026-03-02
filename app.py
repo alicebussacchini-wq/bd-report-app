@@ -186,31 +186,33 @@ if st.session_state["pagina"] == "genera":
         for i, p in enumerate(reader.pages):
             testo += f"\n--- PAGINA {i+1} ---\n{p.extract_text() or ''}"
         
-        # Se testo scarso, usa Claude Vision
+        # Se testo scarso, passa il PDF direttamente a Claude
         if len(testo.strip()) < 500:
-            st.info("PDF scansionato rilevato, uso Claude Vision...")
-            try:
-                immagini = convert_from_bytes(contenuto, poppler_path=POPPLER_PATH, dpi=150)
-                client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-                testo = ""
-                for i, img in enumerate(immagini[:20]):
-                    buffer = io.BytesIO()
-                    img.save(buffer, format="JPEG", quality=85)
-                    img_b64 = base64.b64encode(buffer.getvalue()).decode()
-                    risposta = client_vision.messages.create(
-                        model="claude-opus-4-5",
-                        max_tokens=2000,
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
-                                {"type": "text", "text": "Estrai tutto il testo e i dati numerici da questa pagina di bilancio, mantenendo la struttura originale."}
-                            ]
-                        }]
-                    )
-                    testo += f"\n--- PAGINA {i+1} ---\n{risposta.content[0].text}"
-            except Exception as e:
-                st.warning(f"Vision non disponibile: {e}")
+            st.info("PDF scansionato rilevato, invio a Claude...")
+            pdf_b64 = base64.b64encode(contenuto).decode()
+            client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+            risposta = client_vision.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=4000,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_b64
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Estrai tutto il testo e i dati numerici da questo bilancio, mantenendo la struttura originale. Includi tutti i valori finanziari, ricavi, EBITDA, utile netto, totale attivo e patrimonio netto."
+                        }
+                    ]
+                }]
+            )
+            testo = risposta.content[0].text
         
         testi_documenti["Bilancio Consolidato"] = testo
         documenti_binari[bilancio.name] = contenuto
