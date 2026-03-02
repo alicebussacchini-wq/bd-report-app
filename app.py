@@ -6,6 +6,10 @@ import os
 import requests
 import json
 import base64
+import pytesseract
+from pdf2image import convert_from_bytes
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+POPPLER_PATH = r"C:\poppler\poppler-25.12.0\Library\bin"
 from datetime import datetime
 
 st.set_page_config(page_title="Taxi Report", page_icon="📊", layout="wide")
@@ -73,6 +77,16 @@ def estrai_testo_pdf(file):
     for i, pagina in enumerate(reader.pages):
         testo_pagina = pagina.extract_text() or ""
         testo += f"\n--- PAGINA {i+1} ---\n{testo_pagina}"
+    
+    # Se il testo estratto è troppo scarso, usa OCR
+    if len(testo.strip()) < 500:
+        st.info("PDF scansionato rilevato, uso OCR...")
+        immagini = convert_from_bytes(contenuto, poppler_path=POPPLER_PATH, dpi=200)
+        testo = ""
+        for i, img in enumerate(immagini[:15]):
+            testo_ocr = pytesseract.image_to_string(img, lang="ita")
+            testo += f"\n--- PAGINA {i+1} ---\n{testo_ocr}"
+    
     return testo
 
 def estrai_testo_url(url):
