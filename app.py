@@ -46,7 +46,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def get_logo_base64():
-    logo_path = r"C:\Users\1103540\bd-report-app\logo.jpg"
+    # Funziona sia in locale che su Streamlit Cloud
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg")
     if os.path.exists(logo_path):
         with open(logo_path, "rb") as f:
             return base64.b64encode(f.read()).decode()
