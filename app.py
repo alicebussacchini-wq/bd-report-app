@@ -181,42 +181,43 @@ if st.session_state["pagina"] == "genera":
 
     if bilancio:
         contenuto = bilancio.read()
-        reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
-        testo = ""
-        for i, p in enumerate(reader.pages):
-            testo += f"\n--- PAGINA {i+1} ---\n{p.extract_text() or ''}"
-        
-        # Se testo scarso, passa il PDF direttamente a Claude
-        if len(testo.strip()) < 500:
-            st.info("PDF scansionato rilevato, invio a Claude...")
-            pdf_b64 = base64.b64encode(contenuto).decode()
-            client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-            risposta = client_vision.messages.create(
-                model="claude-opus-4-5",
-                max_tokens=4000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": pdf_b64
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": "Estrai tutto il testo e i dati numerici da questo bilancio, mantenendo la struttura originale. Includi tutti i valori finanziari, ricavi, EBITDA, utile netto, totale attivo e patrimonio netto."
+        pdf_b64 = base64.b64encode(contenuto).decode()
+        client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        st.info("Analisi bilancio in corso...")
+        risposta = client_vision.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=4000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64
                         }
-                    ]
-                }]
-            )
-            testo = risposta.content[0].text
-        
+                    },
+                    {
+                        "type": "text",
+                        "text": """Questo è un bilancio consolidato. Estrai tutti i dati finanziari che riesci a trovare, inclusi:
+- Ricavi totali o valore della produzione
+- EBITDA o margine operativo lordo
+- Utile netto o risultato di esercizio
+- Totale attivo
+- Patrimonio netto
+- Qualsiasi informazione su debiti e finanziamenti
+- Operazioni straordinarie, acquisizioni o finanziamenti menzionati
+
+Restituisci tutto il testo estratto mantenendo i valori numerici esatti."""
+                    }
+                ]
+            }]
+        )
+        testo = risposta.content[0].text
         testi_documenti["Bilancio Consolidato"] = testo
         documenti_binari[bilancio.name] = contenuto
-        st.success("✅ Bilancio caricato")
+        st.success("✅ Bilancio analizzato")
 
     if mergermarket:
         contenuto = mergermarket.read()
