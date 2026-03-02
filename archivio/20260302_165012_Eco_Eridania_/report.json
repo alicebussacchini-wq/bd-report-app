@@ -1,0 +1,23 @@
+{
+  "nome_azienda": "Eco Eridania Società per Azioni",
+  "overview": "Società per azioni italiana con sede legale ad Arenzano (GE), operante nel settore ambientale. Il bilancio consolidato al 31/12/2023 è stato depositato presso il Registro Imprese.",
+  "core_business": "N/D",
+  "mercati": "N/D",
+  "dati_finanziari": {
+    "ricavi": "N/D",
+    "ebitda": "N/D",
+    "utile_netto": "N/D",
+    "totale_attivo": "N/D",
+    "patrimonio_netto": "N/D",
+    "anno_riferimento": "2023"
+  },
+  "struttura_debito": "N/D",
+  "operazioni_ma": [
+    {
+      "anno": "N/D",
+      "tipo": "N/D",
+      "descrizione": "N/D"
+    }
+  ],
+  "note_aggiuntive": "I documenti forniti contengono esclusivamente l'indice del bilancio consolidato e le intestazioni delle pagine (136 pagine totali) senza il contenuto effettivo delle tabelle di bilancio, nota integrativa, relazione di gestione e altre sezioni. Il documento include: Prospetto Contabile (pagg. 2-9), Nota Integrativa (pagg. 10-104), Relazione Gestione (pagg. 105-126), Relazione di Certificazione (pagg. 127-130), Relazione Sindaci (pagg. 131-136). Per estrarre i dati finanziari richiesti sarebbe necessario il contenuto completo del prospetto contabile e della nota integrativa."
+}
