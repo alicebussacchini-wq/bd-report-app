@@ -166,7 +166,7 @@ if st.session_state["pagina"] == "genera":
         st.caption("🏛️ Visura Camerale")
         visura = st.file_uploader("Visura PDF", type=["pdf"], key="visura", label_visibility="collapsed")
 
-   def estrai_testo_pdf(file):
+    def estrai_testo_pdf(file):
     contenuto = file.read()
     reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
     testo = ""
