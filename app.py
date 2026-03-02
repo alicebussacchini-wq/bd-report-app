@@ -6,10 +6,6 @@ import os
 import requests
 import json
 import base64
-import pytesseract
-from pdf2image import convert_from_bytes
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-POPPLER_PATH = r"C:\poppler\poppler-25.12.0\Library\bin"
 from datetime import datetime
 
 st.set_page_config(page_title="Taxi Report", page_icon="📊", layout="wide")
@@ -70,50 +66,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-def estrai_testo_pdf(file):
-    contenuto = file.read()
-    reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
-    testo = ""
-    for i, pagina in enumerate(reader.pages):
-        testo_pagina = pagina.extract_text() or ""
-        testo += f"\n--- PAGINA {i+1} ---\n{testo_pagina}"
-    return testo, contenuto
-
-def analizza_pdf_con_vision(contenuto_pdf, nome_fonte):
-    try:
-        immagini = convert_from_bytes(contenuto_pdf, poppler_path=POPPLER_PATH, dpi=150)
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        testo_completo = ""
-        for i, img in enumerate(immagini[:20]):
-            buffer = io.BytesIO()
-            img.save(buffer, format="JPEG", quality=85)
-            img_b64 = base64.b64encode(buffer.getvalue()).decode()
-            risposta = client.messages.create(
-                model="claude-opus-4-5",
-                max_tokens=2000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": img_b64
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": "Sei un analista finanziario. Estrai tutto il testo e i dati numerici visibili in questa pagina di bilancio, mantenendo la struttura originale. Includi tutti i valori finanziari, voci di conto economico e stato patrimoniale."
-                        }
-                    ]
-                }]
-            )
-            testo_completo += f"\n--- PAGINA {i+1} ---\n{risposta.content[0].text}"
-        return testo_completo
-    except Exception as e:
-        return ""
-
 def estrai_testo_url(url):
     try:
         return requests.get(url, timeout=10).text[:5000]
@@ -164,16 +116,17 @@ if st.session_state["pagina"] == "genera":
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.caption("📄 Bilancio consolidato")
-        bilancio = st.file_uploader("Bilancio PDF completo", type=["pdf"], key="bilancio", label_visibility="collapsed")
-        st.caption("📊 Pagine finanziarie (conto economico + stato patrimoniale)")
-       
+        st.caption("📄 Bilancio consolidato (PDF)")
+        bilancio = st.file_uploader("Bilancio PDF", type=["pdf"], key="bilancio", label_visibility="collapsed")
+
     with col2:
         st.caption("📈 Export Mergermarket")
         mergermarket = st.file_uploader("Mergermarket", type=["pdf", "csv"], key="merger", label_visibility="collapsed")
+
     with col3:
         st.caption("🌐 URL Sito / Press Release")
         url_azienda = st.text_input("URL", placeholder="https://...", label_visibility="collapsed")
+
     with col4:
         st.caption("🏛️ Visura Camerale")
         visura = st.file_uploader("Visura PDF", type=["pdf"], key="visura", label_visibility="collapsed")
@@ -189,7 +142,7 @@ if st.session_state["pagina"] == "genera":
         try:
             risposta = client_vision.messages.create(
                 model="claude-opus-4-5",
-                max_tokens=2000,
+                max_tokens=4000,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -203,7 +156,7 @@ if st.session_state["pagina"] == "genera":
                         },
                         {
                             "type": "text",
-                            "text": "Estrai tutti i dati finanziari da questo bilancio: ricavi totali, EBITDA, utile netto, totale attivo, patrimonio netto, debiti finanziari. Mantieni i valori numerici esatti."
+                            "text": "Estrai tutti i dati finanziari da questo bilancio: ricavi totali, EBITDA, utile netto, totale attivo, patrimonio netto, debiti finanziari. Mantieni i valori numerici esatti con le unità di misura."
                         }
                     ]
                 }]
@@ -211,7 +164,7 @@ if st.session_state["pagina"] == "genera":
             testo = risposta.content[0].text
         except Exception as e:
             testo = ""
-            st.warning(f"Errore: {e}")
+            st.warning(f"Errore analisi bilancio: {e}")
         testi_documenti["Bilancio Consolidato"] = testo
         documenti_binari[bilancio.name] = contenuto
         st.success("✅ Bilancio analizzato")
@@ -235,16 +188,42 @@ if st.session_state["pagina"] == "genera":
 
     if visura:
         contenuto = visura.read()
-        reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
-        testo = ""
-        for i, p in enumerate(reader.pages):
-            testo += f"\n--- PAGINA {i+1} ---\n{p.extract_text() or ''}"
-        testi_documenti["Visura Camerale"] = testo
+        pdf_b64_visura = base64.b64encode(contenuto).decode()
+        client_vision2 = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        try:
+            risposta_visura = client_vision2.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=4000,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_b64_visura
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Estrai tutte le informazioni rilevanti da questa visura camerale: ragione sociale, sede, codice fiscale, soci, amministratori, capitale sociale, oggetto sociale."
+                        }
+                    ]
+                }]
+            )
+            testo_visura = risposta_visura.content[0].text
+        except Exception as e:
+            reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
+            testo_visura = ""
+            for i, p in enumerate(reader.pages):
+                testo_visura += f"\n--- PAGINA {i+1} ---\n{p.extract_text() or ''}"
+        testi_documenti["Visura Camerale"] = testo_visura
         documenti_binari[visura.name] = contenuto
         st.success("✅ Visura caricata")
 
     st.markdown("---")
-    nome_azienda = st.text_input("Nome dell'azienda", placeholder="es. Zambon S.p.A.")
+    nome_azienda = st.text_input("Nome dell'azienda", placeholder="es. Eco Eridania S.p.A.")
 
     if st.button("🚀 Genera Report", disabled=len(testi_documenti) == 0):
         if not nome_azienda:
@@ -257,7 +236,6 @@ if st.session_state["pagina"] == "genera":
 
                 prompt = f"""Sei un analista M&A e finance di uno studio legale internazionale.
 Analizza i seguenti documenti relativi all'azienda {nome_azienda} e produci un report strutturato in JSON.
-I documenti includono bilanci con dati finanziari dettagliati — cerca i ricavi, EBITDA, utile netto, totale attivo e patrimonio netto nelle tabelle di bilancio, anche nelle pagine successive dell'indice.
 
 DOCUMENTI:
 {testo_completo}
