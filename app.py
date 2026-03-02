@@ -181,40 +181,67 @@ if st.session_state["pagina"] == "genera":
 
     if bilancio:
         contenuto = bilancio.read()
-        pdf_b64 = base64.b64encode(contenuto).decode()
         client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        st.info("Analisi bilancio in corso...")
-        risposta = client_vision.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=4000,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_b64
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": """Questo è un bilancio consolidato. Estrai tutti i dati finanziari che riesci a trovare, inclusi:
-- Ricavi totali o valore della produzione
-- EBITDA o margine operativo lordo
-- Utile netto o risultato di esercizio
-- Totale attivo
-- Patrimonio netto
-- Qualsiasi informazione su debiti e finanziamenti
-- Operazioni straordinarie, acquisizioni o finanziamenti menzionati
-
-Restituisci tutto il testo estratto mantenendo i valori numerici esatti."""
-                    }
-                ]
-            }]
-        )
-        testo = risposta.content[0].text
+        reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
+        
+        # Estrai testo normale
+        testo = ""
+        for i, p in enumerate(reader.pages):
+            testo += f"\n--- PAGINA {i+1} ---\n{p.extract_text() or ''}"
+        
+        # Se testo scarso, cerca le pagine con dati finanziari e invia solo quelle
+        if len(testo.strip()) < 500:
+            st.info("Analisi avanzata bilancio in corso...")
+            
+            # Cerca pagine con parole chiave finanziarie
+            pagine_rilevanti = []
+            keywords = ["ricavi", "fatturato", "ebitda", "utile", "attivo", "patrimonio", "revenue", "profit"]
+            for i, p in enumerate(reader.pages):
+                testo_p = (p.extract_text() or "").lower()
+                if any(k in testo_p for k in keywords):
+                    pagine_rilevanti.append(i)
+            
+            # Se non trova pagine rilevanti, usa le prime 5
+            if not pagine_rilevanti:
+                pagine_rilevanti = list(range(min(5, len(reader.pages))))
+            else:
+                pagine_rilevanti = pagine_rilevanti[:5]
+            
+            # Crea PDF ridotto
+            from PyPDF2 import PdfWriter
+            writer = PdfWriter()
+            for i in pagine_rilevanti:
+                writer.add_page(reader.pages[i])
+            buffer_ridotto = io.BytesIO()
+            writer.write(buffer_ridotto)
+            pdf_b64 = base64.b64encode(buffer_ridotto.getvalue()).decode()
+            
+            try:
+                risposta = client_vision.messages.create(
+                    model="claude-opus-4-5",
+                    max_tokens=4000,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": pdf_b64
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Estrai tutti i dati finanziari: ricavi, EBITDA, utile netto, totale attivo, patrimonio netto, debiti. Mantieni i valori numerici esatti."
+                            }
+                        ]
+                    }]
+                )
+                testo = risposta.content[0].text
+            except Exception as e:
+                st.warning(f"Errore analisi avanzata: {e}. Uso testo estratto.")
+        
         testi_documenti["Bilancio Consolidato"] = testo
         documenti_binari[bilancio.name] = contenuto
         st.success("✅ Bilancio analizzato")
