@@ -315,28 +315,15 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
 
                 time.sleep(60)
                 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-                messaggio = client.messages.create(
-                    model="claude-opus-4-5",
-                    max_tokens=4000,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                risposta = messaggio.content[0].text
-
                 try:
-                    risposta_pulita = risposta.strip()
-                    if risposta_pulita.startswith("```"):
-                        risposta_pulita = risposta_pulita.split("```")[1]
-                        if risposta_pulita.startswith("json"):
-                            risposta_pulita = risposta_pulita[4:]
-                    risposta_pulita = risposta_pulita.strip()
-                    report = json.loads(risposta_pulita)
-                    salva_report(nome_azienda, report, documenti_binari)
-                    st.session_state["report"] = report
-                    st.success("✅ Report generato e salvato!")
-                    st.rerun()
-                except Exception as e:
-                    st.error("Errore nel parsing. Risposta grezza:")
-                    st.text(risposta)
+                    messaggio = client.messages.create(
+                        model="claude-opus-4-5",
+                        max_tokens=4000,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                except Exception as report_error:
+                    st.error(f"Errore generazione report: {type(report_error).__name__}: {str(report_error)}")
+                    st.stop()
 
     if "report" in st.session_state:
         report = st.session_state["report"]
