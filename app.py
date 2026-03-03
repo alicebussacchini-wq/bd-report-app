@@ -172,7 +172,7 @@ if st.session_state["pagina"] == "genera":
         pdf_b64 = base64.b64encode(contenuto).decode()
         client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         st.info("Analisi bilancio in corso...")
-        time.sleep(5)
+        time.sleep(30)
         try:
             risposta = client_vision.messages.create(
                 model="claude-haiku-4-5-20251001",
