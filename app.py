@@ -144,6 +144,7 @@ st.markdown("---")
 
 if st.session_state["pagina"] == "genera":
 
+    lingua = st.radio("🌐 Lingua del report / Report language", ["Italiano", "English"], horizontal=True)
     st.markdown("### Carica i documenti")
     col1, col2, col3, col4 = st.columns(4)
 
@@ -266,9 +267,10 @@ if st.session_state["pagina"] == "genera":
                 testo_completo = ""
                 for fonte, testo in testi_documenti.items():
                     testo_completo += f"\n\n--- FONTE: {fonte} ---\n{testo[:25000]}"
-
+                 
+                lingua_prompt = "in inglese" if lingua == "English" else "in italiano"
                 prompt = f"""Sei un analista M&A e finance di uno studio legale internazionale.
-Analizza i seguenti documenti relativi all'azienda {nome_azienda} e produci un report strutturato in JSON.
+Analizza i seguenti documenti relativi all'azienda {nome_azienda} e produci un report strutturato in JSON, con tutti i testi {lingua_prompt}.
 
 DOCUMENTI:
 {testo_completo}
@@ -288,7 +290,22 @@ Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo
     "patrimonio_netto": "",
     "anno_riferimento": ""
   }},
-  "struttura_debito": "",
+  "struttura_debito": {{
+    "indebitamento_totale": "",
+    "debito_bancario": "",
+    "obbligazioni": "",
+    "debito_netto": "",
+    "leva_finanziaria": "",
+    "scadenze_principali": "",
+    "note": ""
+  }},
+  "ownership": {{
+    "azionista_principale": "",
+    "quota_principale": "",
+    "altri_azionisti": "",
+    "struttura_controllo": "",
+    "note": ""
+  }},
   "operazioni_ma": [
     {{"anno": "", "tipo": "", "descrizione": ""}}
   ],
@@ -346,7 +363,40 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
             st.markdown(f'<div class="section-box"><div class="section-title">Mercati</div><div class="section-text">{report.get("mercati","N/D")}</div></div>', unsafe_allow_html=True)
 
         with st.expander("💰 Struttura del Debito"):
-            st.markdown(f'<div class="section-box"><div class="section-title">Debito</div><div class="section-text">{report.get("struttura_debito","N/D")}</div></div>', unsafe_allow_html=True)
+            debito = report.get("struttura_debito", {})
+            if isinstance(debito, dict):
+                st.markdown(f"""
+                <div class="kpi-grid">
+                    <div class="kpi-card"><div class="kpi-label">Indebitamento Totale</div><div class="kpi-value">{debito.get('indebitamento_totale','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{debito.get('debito_bancario','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{debito.get('obbligazioni','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{debito.get('debito_netto','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Leva Finanziaria</div><div class="kpi-value">{debito.get('leva_finanziaria','N/D')}</div></div>
+                </div>
+                """, unsafe_allow_html=True)
+                if debito.get('scadenze_principali', 'N/D') != 'N/D':
+                    st.markdown(f'<div class="section-box"><div class="section-title">Scadenze Principali</div><div class="section-text">{debito.get("scadenze_principali","N/D")}</div></div>', unsafe_allow_html=True)
+                if debito.get('note', 'N/D') != 'N/D':
+                    st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{debito.get("note","N/D")}</div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="section-box"><div class="section-text">{debito}</div></div>', unsafe_allow_html=True)
+          with st.expander("👥 Struttura Ownership"):
+            ownership = report.get("ownership", {})
+            if isinstance(ownership, dict):
+                st.markdown(f"""
+                <div class="kpi-grid">
+                    <div class="kpi-card"><div class="kpi-label">Azionista Principale</div><div class="kpi-value">{ownership.get('azionista_principale','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Quota</div><div class="kpi-value">{ownership.get('quota_principale','N/D')}</div></div>
+                </div>
+                """, unsafe_allow_html=True)
+                if ownership.get('altri_azionisti', 'N/D') != 'N/D':
+                    st.markdown(f'<div class="section-box"><div class="section-title">Altri Azionisti</div><div class="section-text">{ownership.get("altri_azionisti","N/D")}</div></div>', unsafe_allow_html=True)
+                if ownership.get('struttura_controllo', 'N/D') != 'N/D':
+                    st.markdown(f'<div class="section-box"><div class="section-title">Struttura di Controllo</div><div class="section-text">{ownership.get("struttura_controllo","N/D")}</div></div>', unsafe_allow_html=True)
+                if ownership.get('note', 'N/D') != 'N/D':
+                    st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{ownership.get("note","N/D")}</div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="section-box"><div class="section-text">{ownership}</div></div>', unsafe_allow_html=True)
 
         with st.expander("🔀 Operazioni M&A"):
             operazioni = report.get("operazioni_ma", [])
