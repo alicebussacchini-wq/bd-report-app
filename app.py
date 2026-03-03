@@ -172,35 +172,42 @@ if st.session_state["pagina"] == "genera":
         pdf_b64 = base64.b64encode(contenuto).decode()
         client_vision = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         st.info("Analisi bilancio in corso...")
-        try:
-            risposta = client_vision.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": pdf_b64
+        testo = ""
+        for tentativo in range(3):
+            try:
+                risposta = client_vision.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=4000,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": pdf_b64
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Estrai tutti i dati finanziari da questo bilancio: ricavi totali, EBITDA, utile netto, totale attivo, patrimonio netto, debiti finanziari. Mantieni i valori numerici esatti con le unità di misura."
                             }
-                        },
-                        {
-                            "type": "text",
-                            "text": "Estrai tutti i dati finanziari da questo bilancio: ricavi totali, EBITDA, utile netto, totale attivo, patrimonio netto, debiti finanziari. Mantieni i valori numerici esatti con le unità di misura."
-                        }
-                    ]
-                }]
-            )
-            testo = risposta.content[0].text
-        except Exception as e:
-            testo = ""
-            st.warning(f"Errore analisi bilancio: {e}")
+                        ]
+                    }]
+                )
+                testo = risposta.content[0].text
+                break
+            except Exception as e:
+                if tentativo < 2:
+                    st.warning(f"Tentativo {tentativo+1} fallito, riprovo tra 30 secondi...")
+                    time.sleep(30)
+                else:
+                    st.warning(f"Errore analisi bilancio dopo 3 tentativi: {e}")
         testi_documenti["Bilancio Consolidato"] = testo
         documenti_binari[bilancio.name] = contenuto
-        st.success("✅ Bilancio analizzato")
+        if testo:
+            st.success("✅ Bilancio analizzato")
 
     if mergermarket:
         contenuto = mergermarket.read()
