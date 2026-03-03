@@ -317,13 +317,24 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
                 try:
                     messaggio = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=4000,
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=4000,
                         messages=[{"role": "user", "content": prompt}]
                     )
+                    risposta = messaggio.content[0].text
+                    risposta_pulita = risposta.strip()
+                    if risposta_pulita.startswith("```"):
+                        risposta_pulita = risposta_pulita.split("```")[1]
+                        if risposta_pulita.startswith("json"):
+                            risposta_pulita = risposta_pulita[4:]
+                    risposta_pulita = risposta_pulita.strip()
+                    report = json.loads(risposta_pulita)
+                    salva_report(nome_azienda, report, documenti_binari)
+                    st.session_state["report"] = report
+                    st.success("✅ Report generato e salvato!")
+                    st.rerun()
                 except Exception as report_error:
-                    st.error(f"Errore generazione report: {type(report_error).__name__}: {str(report_error)}")
-                    st.stop()
+                    st.error(f"Errore: {type(report_error).__name__}: {str(report_error)}")
 
     if "report" in st.session_state:
         report = st.session_state["report"]
