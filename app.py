@@ -380,7 +380,8 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                     st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{debito.get("note","N/D")}</div></div>', unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="section-box"><div class="section-text">{debito}</div></div>', unsafe_allow_html=True)
-          with st.expander("👥 Struttura Ownership"):
+
+        with st.expander("👥 Struttura Ownership"):
             ownership = report.get("ownership", {})
             if isinstance(ownership, dict):
                 st.markdown(f"""
