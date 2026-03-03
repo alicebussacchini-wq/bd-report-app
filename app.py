@@ -175,7 +175,7 @@ if st.session_state["pagina"] == "genera":
         time.sleep(5)
         try:
             risposta = client_vision.messages.create(
-                model="claude-opus-4-5",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=4000,
                 messages=[{
                     "role": "user",
@@ -266,7 +266,7 @@ if st.session_state["pagina"] == "genera":
             with st.spinner("Claude sta analizzando i documenti..."):
                 testo_completo = ""
                 for fonte, testo in testi_documenti.items():
-                    testo_completo += f"\n\n--- FONTE: {fonte} ---\n{testo[:25000]}"
+                    testo_completo += f"\n\n--- FONTE: {fonte} ---\n{testo[:10000]}"
                  
                 lingua_prompt = "in inglese" if lingua == "English" else "in italiano"
                 prompt = f"""Sei un analista M&A e finance di uno studio legale internazionale.
