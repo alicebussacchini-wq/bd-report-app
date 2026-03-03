@@ -317,8 +317,8 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
                 try:
                     messaggio = client.messages.create(
-                        model="claude-opus-4-5",
-                        max_tokens=4000,
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=4000,
                         messages=[{"role": "user", "content": prompt}]
                     )
                 except Exception as report_error:
