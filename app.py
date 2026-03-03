@@ -7,6 +7,8 @@ import requests
 import json
 import base64
 import time
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 st.set_page_config(page_title="Taxi Report", page_icon="📊", layout="wide")
@@ -74,30 +76,58 @@ def estrai_testo_url(url):
     except:
         return "Impossibile recuperare il contenuto dell'URL."
 
+def get_sheet():
+    credenziali = {
+        "type": st.secrets["gcp_service_account"]["type"],
+        "project_id": st.secrets["gcp_service_account"]["project_id"],
+        "private_key_id": st.secrets["gcp_service_account"]["private_key_id"],
+        "private_key": st.secrets["gcp_service_account"]["private_key"],
+        "client_email": st.secrets["gcp_service_account"]["client_email"],
+        "client_id": st.secrets["gcp_service_account"]["client_id"],
+        "auth_uri": st.secrets["gcp_service_account"]["auth_uri"],
+        "token_uri": st.secrets["gcp_service_account"]["token_uri"],
+        "auth_provider_x509_cert_url": st.secrets["gcp_service_account"]["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": st.secrets["gcp_service_account"]["client_x509_cert_url"]
+    }
+    scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_info(credenziali, scopes=scopes)
+    client = gspread.authorize(creds)
+    sheet = client.open("Taxi Report Archivio").sheet1
+    return sheet
+
 def salva_report(nome_azienda, report_json, documenti_files):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nome_cartella = f"{timestamp}_{nome_azienda.replace(' ', '_')}"
-    cartella = os.path.join(ARCHIVIO_PATH, nome_cartella)
-    os.makedirs(cartella, exist_ok=True)
-    with open(os.path.join(cartella, "report.json"), "w", encoding="utf-8") as f:
-        json.dump(report_json, f, ensure_ascii=False, indent=2)
-    for nome_file, contenuto in documenti_files.items():
-        with open(os.path.join(cartella, nome_file), "wb") as f:
-            f.write(contenuto)
+    try:
+        sheet = get_sheet()
+        timestamp = datetime.now().strftime("%d/%m/%Y %H:%M")
+        sheet.append_row([
+            timestamp,
+            nome_azienda,
+            json.dumps(report_json, ensure_ascii=False)
+        ])
+    except Exception as e:
+        st.warning(f"Errore salvataggio archivio: {e}")
 
 def carica_archivio():
-    reports = []
-    if not os.path.exists(ARCHIVIO_PATH):
+    try:
+        sheet = get_sheet()
+        righe = sheet.get_all_values()
+        reports = []
+        for riga in reversed(righe):
+            if len(riga) >= 3 and riga[2]:
+                try:
+                    report = json.loads(riga[2])
+                    reports.append({
+                        "data": riga[0],
+                        "nome": riga[1],
+                        "report": report,
+                        "riga": righe.index(riga) + 1
+                    })
+                except:
+                    pass
         return reports
-    for cartella in sorted(os.listdir(ARCHIVIO_PATH), reverse=True):
-        percorso = os.path.join(ARCHIVIO_PATH, cartella)
-        report_file = os.path.join(percorso, "report.json")
-        if os.path.exists(report_file):
-            with open(report_file, "r", encoding="utf-8") as f:
-                report = json.load(f)
-            docs = [d for d in os.listdir(percorso) if d != "report.json"]
-            reports.append({"cartella": cartella, "percorso": percorso, "report": report, "docs": docs})
-    return reports
+    except Exception as e:
+        st.warning(f"Errore caricamento archivio: {e}")
+        return []
 
 if "pagina" not in st.session_state:
     st.session_state["pagina"] = "genera"
@@ -345,16 +375,11 @@ elif st.session_state["pagina"] == "archivio":
         for item in reports:
             r = item["report"]
             fin = r.get("dati_finanziari", {})
-            data_str = item["cartella"][:8]
-            try:
-                data_fmt = datetime.strptime(data_str, "%Y%m%d").strftime("%d %b %Y")
-            except:
-                data_fmt = data_str
 
             st.markdown(f"""
             <div class="archivio-card">
                 <div class="archivio-nome">{r.get('nome_azienda','')}</div>
-                <div class="archivio-data">📅 {data_fmt} &nbsp;|&nbsp; 📎 {len(item['docs'])} documenti</div>
+                <div class="archivio-data">📅 {item['data']}</div>
                 <div class="archivio-kpi">
                     <div class="archivio-kpi-item"><span class="archivio-kpi-label">Ricavi</span><span class="archivio-kpi-val">{fin.get('ricavi','N/D')}</span></div>
                     <div class="archivio-kpi-item"><span class="archivio-kpi-label">EBITDA</span><span class="archivio-kpi-val">{fin.get('ebitda','N/D')}</span></div>
@@ -366,13 +391,16 @@ elif st.session_state["pagina"] == "archivio":
 
             col_a, col_b, col_c = st.columns([1, 1, 4])
             with col_a:
-                if st.button("📖 Apri", key=f"apri_{item['cartella']}"):
+                if st.button("📖 Apri", key=f"apri_{item['riga']}"):
                     st.session_state["report"] = r
                     st.session_state["pagina"] = "genera"
                     st.rerun()
             with col_b:
-                if st.button("🗑️ Elimina", key=f"elimina_{item['cartella']}"):
-                    import shutil
-                    shutil.rmtree(item["percorso"])
-                    st.success("Report eliminato.")
-                    st.rerun()
+                if st.button("🗑️ Elimina", key=f"elimina_{item['riga']}"):
+                    try:
+                        sheet = get_sheet()
+                        sheet.delete_rows(item["riga"])
+                        st.success("Report eliminato.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Errore: {e}")
