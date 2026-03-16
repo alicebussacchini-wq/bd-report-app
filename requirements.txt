@@ -6,3 +6,5 @@ PyPDF2
 requests
 gspread
 google-auth
+openpyxl
+python-docx

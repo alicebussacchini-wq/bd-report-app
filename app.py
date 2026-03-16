@@ -12,6 +12,14 @@ import gspread
 from pypdf import PdfReader, PdfWriter
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+from export import genera_excel, genera_word
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from docx import Document
+from docx.shared import Pt, RGBColor, Cm, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 
 # ── Configurazione pagina ─────────────────────────────────────────────────────
 
@@ -575,6 +583,448 @@ def carica_archivio():
         st.warning(f"Errore caricamento archivio: {e}")
         return []
 
+
+# ── Esportazione Excel ────────────────────────────────────────────────────────
+
+# Colori HL
+HL_VERDE    = "C8E04A"
+HL_NERO     = "1A1A1A"
+HL_GRIGIO_S = "2A2A2A"
+HL_GRIGIO_C = "444444"
+HL_BIANCO   = "F0F0F0"
+
+def _cell_style(ws, row, col, value, bold=False, bg=None, fg="F0F0F0",
+                align="left", border=False, num_format=None):
+    cell = ws.cell(row=row, column=col, value=value)
+    cell.font = Font(name="Calibri", size=10, bold=bold,
+                     color=fg if fg else "000000")
+    if bg:
+        cell.fill = PatternFill("solid", fgColor=bg)
+    cell.alignment = Alignment(horizontal=align, vertical="center",
+                               wrap_text=True)
+    if border:
+        side = Side(style="thin", color=HL_GRIGIO_C)
+        cell.border = Border(left=side, right=side, top=side, bottom=side)
+    if num_format:
+        cell.number_format = num_format
+    return cell
+
+
+def genera_excel(reports: list) -> bytes:
+    """
+    Genera un file Excel con un foglio per ogni report
+    più un foglio KPI Summary comparativo se ci sono più report.
+    """
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)  # rimuovi foglio vuoto default
+
+    # ── Foglio KPI Summary (sempre presente) ─────────────────────────────────
+    ws_sum = wb.create_sheet("KPI Summary")
+    ws_sum.sheet_view.showGridLines = False
+    ws_sum.tab_color = HL_VERDE
+
+    # Header riga 1
+    ws_sum.row_dimensions[1].height = 30
+    titolo_cell = ws_sum.cell(row=1, column=1, value="TAXI REPORT — KPI Summary")
+    titolo_cell.font = Font(name="Calibri", size=14, bold=True, color=HL_VERDE)
+    titolo_cell.fill = PatternFill("solid", fgColor=HL_NERO)
+    ws_sum.merge_cells(start_row=1, start_column=1,
+                       end_row=1, end_column=2 + len(reports))
+
+    # Sottotitolo
+    ws_sum.row_dimensions[2].height = 16
+    sub = ws_sum.cell(row=2, column=1,
+                      value=f"Generato il {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    sub.font = Font(name="Calibri", size=9, color="999999")
+    sub.fill = PatternFill("solid", fgColor=HL_NERO)
+    ws_sum.merge_cells(start_row=2, start_column=1,
+                       end_row=2, end_column=2 + len(reports))
+
+    # Intestazioni colonne: KPI | Azienda1 (anno) | Azienda2 (anno) ...
+    ws_sum.row_dimensions[4].height = 28
+    _cell_style(ws_sum, 4, 1, "KPI", bold=True, bg=HL_NERO, fg=HL_VERDE,
+                align="left", border=True)
+    _cell_style(ws_sum, 4, 2, "Unità", bold=True, bg=HL_NERO, fg=HL_VERDE,
+                align="center", border=True)
+    for j, r in enumerate(reports):
+        label = f"{r['nome']} ({r['anno']})"
+        _cell_style(ws_sum, 4, 3 + j, label, bold=True, bg=HL_NERO,
+                    fg=HL_VERDE, align="center", border=True)
+
+    # Righe KPI
+    kpi_rows = [
+        ("Ricavi",           "dati_finanziari", "ricavi",            "€ #,##0"),
+        ("EBITDA",           "dati_finanziari", "ebitda",            "€ #,##0"),
+        ("Margine EBITDA",   None,              "_margine_ebitda",   "0.0%"),
+        ("EBIT",             "dati_finanziari", "ebit",              "€ #,##0"),
+        ("Utile Netto",      "dati_finanziari", "utile_netto",       "€ #,##0"),
+        ("Ammortamenti",     "dati_finanziari", "ammortamenti",      "€ #,##0"),
+        ("Totale Attivo",    "dati_finanziari", "totale_attivo",     "€ #,##0"),
+        ("Patrimonio Netto", "dati_finanziari", "patrimonio_netto",  "€ #,##0"),
+        ("Cassa",            "dati_finanziari", "cassa",             "€ #,##0"),
+        ("Debito Netto",     "struttura_debito","debito_netto",      "€ #,##0"),
+        ("Indebitamento Tot","struttura_debito","indebitamento_totale","€ #,##0"),
+        ("Leva (x)",         "struttura_debito","leva_finanziaria",  "0.0"),
+    ]
+
+    for i, (label, sezione, campo, fmt) in enumerate(kpi_rows):
+        row_idx = 5 + i
+        ws_sum.row_dimensions[row_idx].height = 20
+        bg = HL_GRIGIO_S if i % 2 == 0 else HL_NERO
+        _cell_style(ws_sum, row_idx, 1, label, bg=bg, fg=HL_BIANCO,
+                    border=True)
+        _cell_style(ws_sum, row_idx, 2, "EUR" if "€" in fmt else "x" if "0.0" == fmt else "%",
+                    bg=bg, fg="999999", align="center", border=True)
+
+        for j, r in enumerate(reports):
+            report = r["report"]
+            val = None
+            if campo == "_margine_ebitda":
+                ric = report.get("dati_finanziari", {}).get("ricavi")
+                ebt = report.get("dati_finanziari", {}).get("ebitda")
+                if ric and ebt:
+                    try:
+                        val = float(ebt) / float(ric)
+                    except:
+                        pass
+            elif sezione:
+                raw = report.get(sezione, {}).get(campo)
+                if raw is not None:
+                    try:
+                        val = float(raw)
+                    except:
+                        pass
+
+            cell = _cell_style(ws_sum, row_idx, 3 + j, val, bg=bg,
+                               fg=HL_BIANCO, align="right", border=True,
+                               num_format=fmt)
+
+    # Warning validazione se presenti
+    warn_row = 5 + len(kpi_rows) + 2
+    has_warnings = any(r["report"].get("_validation_warnings") for r in reports)
+    if has_warnings:
+        w_cell = ws_sum.cell(row=warn_row, column=1,
+                             value="⚠️ Note validazione")
+        w_cell.font = Font(name="Calibri", size=10, bold=True, color="E65100")
+        w_cell.fill = PatternFill("solid", fgColor="2E2A1A")
+        ws_sum.merge_cells(start_row=warn_row, start_column=1,
+                           end_row=warn_row, end_column=2 + len(reports))
+        for r in reports:
+            for w in r["report"].get("_validation_warnings", []):
+                warn_row += 1
+                msg = f"{r['nome']} ({r['anno']}) — {w['campo']}: {w['messaggio']}"
+                wc = ws_sum.cell(row=warn_row, column=1, value=msg)
+                wc.font = Font(name="Calibri", size=9,
+                               color="C62828" if w["livello"] == "error" else "E65100")
+                wc.fill = PatternFill("solid", fgColor=HL_NERO)
+                ws_sum.merge_cells(start_row=warn_row, start_column=1,
+                                   end_row=warn_row, end_column=2 + len(reports))
+
+    # Larghezze colonne
+    ws_sum.column_dimensions["A"].width = 22
+    ws_sum.column_dimensions["B"].width = 8
+    for j in range(len(reports)):
+        ws_sum.column_dimensions[get_column_letter(3 + j)].width = 22
+
+    # ── Un foglio per ogni report (dati completi) ─────────────────────────────
+    for r in reports:
+        nome_sheet = f"{r['nome'][:20]} {r['anno']}"
+        ws = wb.create_sheet(nome_sheet)
+        ws.sheet_view.showGridLines = False
+
+        report = r["report"]
+        fin    = report.get("dati_finanziari", {})
+        debito = report.get("struttura_debito", {})
+
+        # Intestazione
+        ws.row_dimensions[1].height = 30
+        h = ws.cell(row=1, column=1,
+                    value=f"{r['nome']} — Bilancio {r['anno']}")
+        h.font = Font(name="Calibri", size=13, bold=True, color=HL_VERDE)
+        h.fill = PatternFill("solid", fgColor=HL_NERO)
+        ws.merge_cells("A1:C1")
+
+        # Sezione Dati Finanziari
+        _cell_style(ws, 3, 1, "DATI FINANZIARI", bold=True, bg=HL_GRIGIO_S,
+                    fg=HL_VERDE, border=True)
+        _cell_style(ws, 3, 2, "Valore (EUR)", bold=True, bg=HL_GRIGIO_S,
+                    fg=HL_VERDE, align="right", border=True)
+        _cell_style(ws, 3, 3, "Note", bold=True, bg=HL_GRIGIO_S,
+                    fg=HL_VERDE, border=True)
+
+        fin_campi = [
+            ("Ricavi",            fin.get("ricavi")),
+            ("EBITDA",            fin.get("ebitda")),
+            ("EBIT",              fin.get("ebit")),
+            ("Utile Netto",       fin.get("utile_netto")),
+            ("Ammortamenti",      fin.get("ammortamenti")),
+            ("Totale Attivo",     fin.get("totale_attivo")),
+            ("Patrimonio Netto",  fin.get("patrimonio_netto")),
+            ("Cassa",             fin.get("cassa")),
+        ]
+        for i, (label, val) in enumerate(fin_campi):
+            row = 4 + i
+            bg = HL_GRIGIO_S if i % 2 == 0 else HL_NERO
+            ws.row_dimensions[row].height = 18
+            _cell_style(ws, row, 1, label, bg=bg, fg=HL_BIANCO, border=True)
+            num = None
+            if val is not None:
+                try:
+                    num = float(val)
+                except:
+                    pass
+            _cell_style(ws, row, 2, num, bg=bg, fg=HL_BIANCO,
+                        align="right", border=True, num_format="€ #,##0")
+            nota = ""
+            if label == "Unità originale":
+                nota = fin.get("_unita_originale", "")
+            _cell_style(ws, row, 3, nota, bg=bg, fg="999999", border=True)
+
+        # Sezione Struttura Debito
+        deb_start = 4 + len(fin_campi) + 2
+        _cell_style(ws, deb_start, 1, "STRUTTURA DEBITO", bold=True,
+                    bg=HL_GRIGIO_S, fg=HL_VERDE, border=True)
+        _cell_style(ws, deb_start, 2, "Valore (EUR)", bold=True,
+                    bg=HL_GRIGIO_S, fg=HL_VERDE, align="right", border=True)
+        _cell_style(ws, deb_start, 3, "Note", bold=True, bg=HL_GRIGIO_S,
+                    fg=HL_VERDE, border=True)
+
+        deb_campi = [
+            ("Indebitamento Totale", debito.get("indebitamento_totale")),
+            ("Debito Bancario",      debito.get("debito_bancario")),
+            ("Obbligazioni",         debito.get("obbligazioni")),
+            ("Debito Netto",         debito.get("debito_netto")),
+            ("Leva Finanziaria",     debito.get("leva_finanziaria")),
+        ]
+        for i, (label, val) in enumerate(deb_campi):
+            row = deb_start + 1 + i
+            bg = HL_GRIGIO_S if i % 2 == 0 else HL_NERO
+            ws.row_dimensions[row].height = 18
+            _cell_style(ws, row, 1, label, bg=bg, fg=HL_BIANCO, border=True)
+            num = None
+            if val is not None:
+                try:
+                    num = float(val)
+                except:
+                    pass
+            fmt = "0.0" if label == "Leva Finanziaria" else "€ #,##0"
+            _cell_style(ws, row, 2, num, bg=bg, fg=HL_BIANCO,
+                        align="right", border=True, num_format=fmt)
+            _cell_style(ws, row, 3, "", bg=bg, fg="999999", border=True)
+
+        # Sezione testi
+        testi_start = deb_start + len(deb_campi) + 2
+        for label, campo in [
+            ("OVERVIEW", "overview"),
+            ("CORE BUSINESS", "core_business"),
+            ("MERCATI", "mercati"),
+            ("NOTE AGGIUNTIVE", "note_aggiuntive"),
+        ]:
+            val = report.get(campo, "N/D") or "N/D"
+            _cell_style(ws, testi_start, 1, label, bold=True,
+                        bg=HL_GRIGIO_S, fg=HL_VERDE, border=True)
+            ws.merge_cells(start_row=testi_start, start_column=1,
+                           end_row=testi_start, end_column=3)
+            testi_start += 1
+            tc = ws.cell(row=testi_start, column=1, value=val)
+            tc.font = Font(name="Calibri", size=9, color=HL_BIANCO)
+            tc.fill = PatternFill("solid", fgColor=HL_NERO)
+            tc.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.row_dimensions[testi_start].height = 60
+            ws.merge_cells(start_row=testi_start, start_column=1,
+                           end_row=testi_start, end_column=3)
+            testi_start += 2
+
+        # Larghezze
+        ws.column_dimensions["A"].width = 25
+        ws.column_dimensions["B"].width = 20
+        ws.column_dimensions["C"].width = 35
+
+    # Output bytes
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ── Esportazione Word ─────────────────────────────────────────────────────────
+
+def genera_word(reports: list) -> bytes:
+    """
+    Genera un documento Word con un report per azienda.
+    Stile HL: header con logo/titolo, tabelle KPI, sezioni testo.
+    """
+    doc = Document()
+
+    # Imposta margini
+    for section in doc.sections:
+        section.top_margin    = Cm(2)
+        section.bottom_margin = Cm(2)
+        section.left_margin   = Cm(2.5)
+        section.right_margin  = Cm(2.5)
+
+    # Stili base
+    style_normal = doc.styles["Normal"]
+    style_normal.font.name = "Calibri"
+    style_normal.font.size = Pt(10)
+
+    def add_heading(text, level=1, color_hex="C8E04A"):
+        p = doc.add_paragraph()
+        run = p.add_run(text)
+        run.font.name = "Calibri"
+        run.font.bold = True
+        run.font.size = Pt(14 if level == 1 else 11)
+        run.font.color.rgb = RGBColor.from_string(color_hex)
+        p.paragraph_format.space_before = Pt(12)
+        p.paragraph_format.space_after  = Pt(4)
+        return p
+
+    def add_kpi_table(doc, kpi_list):
+        """Aggiunge una tabella KPI a due colonne (label | valore)."""
+        table = doc.add_table(rows=0, cols=2)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+
+        # Larghezze colonne
+        for col_idx, width in enumerate([Cm(6), Cm(10)]):
+            for cell in table.columns[col_idx].cells:
+                cell.width = width
+
+        for label, value in kpi_list:
+            row = table.add_row()
+            # Label
+            lc = row.cells[0]
+            lc.text = label
+            lc.paragraphs[0].runs[0].font.bold = True
+            lc.paragraphs[0].runs[0].font.size = Pt(9)
+            lc.paragraphs[0].runs[0].font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+            # Valore
+            vc = row.cells[1]
+            vc.text = str(value) if value is not None else "N/D"
+            vc.paragraphs[0].runs[0].font.size = Pt(10)
+            vc.paragraphs[0].runs[0].font.bold = True
+        return table
+
+    for idx, r in enumerate(reports):
+        report = r["report"]
+        fin    = report.get("dati_finanziari", {})
+        debito = report.get("struttura_debito", {})
+
+        # ── Copertina sezione ────────────────────────────────────────────────
+        if idx > 0:
+            doc.add_page_break()
+
+        # Titolo azienda
+        p_title = doc.add_paragraph()
+        run = p_title.add_run(r["nome"].upper())
+        run.font.name   = "Calibri"
+        run.font.bold   = True
+        run.font.size   = Pt(20)
+        run.font.color.rgb = RGBColor.from_string("C8E04A")
+        p_title.paragraph_format.space_after = Pt(2)
+
+        p_sub = doc.add_paragraph()
+        run2 = p_sub.add_run(f"Bilancio {r['anno']}  |  Generato il {datetime.now().strftime('%d/%m/%Y')}")
+        run2.font.name  = "Calibri"
+        run2.font.size  = Pt(9)
+        run2.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+        p_sub.paragraph_format.space_after = Pt(16)
+
+        # Linea separatore
+        p_hr = doc.add_paragraph("─" * 80)
+        p_hr.runs[0].font.color.rgb = RGBColor.from_string("C8E04A")
+        p_hr.runs[0].font.size = Pt(7)
+        p_hr.paragraph_format.space_after = Pt(12)
+
+        # ── Warning validazione ───────────────────────────────────────────────
+        warnings = report.get("_validation_warnings", [])
+        if warnings:
+            add_heading("⚠️ Note di validazione", level=2, color_hex="E65100")
+            for w in warnings:
+                p = doc.add_paragraph(style="List Bullet")
+                run = p.add_run(f"{w['campo']}: {w['messaggio']}")
+                run.font.size = Pt(9)
+                run.font.color.rgb = (RGBColor(0xC6, 0x28, 0x28)
+                                      if w["livello"] == "error"
+                                      else RGBColor(0xE6, 0x51, 0x00))
+
+        # ── Dati finanziari ───────────────────────────────────────────────────
+        add_heading("Dati Finanziari", level=2)
+        kpi_fin = [
+            ("Ricavi",            _fmt(fin.get("ricavi"))),
+            ("EBITDA",            _fmt(fin.get("ebitda"))),
+            ("Margine EBITDA",    f"{float(fin['ebitda'])/float(fin['ricavi'])*100:.1f}%"
+                                  if fin.get("ebitda") and fin.get("ricavi") else "N/D"),
+            ("EBIT",              _fmt(fin.get("ebit"))),
+            ("Utile Netto",       _fmt(fin.get("utile_netto"))),
+            ("Totale Attivo",     _fmt(fin.get("totale_attivo"))),
+            ("Patrimonio Netto",  _fmt(fin.get("patrimonio_netto"))),
+            ("Cassa",             _fmt(fin.get("cassa"))),
+        ]
+        add_kpi_table(doc, kpi_fin)
+
+        # ── Struttura debito ──────────────────────────────────────────────────
+        add_heading("Struttura del Debito", level=2)
+        kpi_deb = [
+            ("Indebitamento Totale", _fmt(debito.get("indebitamento_totale"))),
+            ("Debito Bancario",      _fmt(debito.get("debito_bancario"))),
+            ("Obbligazioni",         _fmt(debito.get("obbligazioni"))),
+            ("Debito Netto",         _fmt(debito.get("debito_netto"))),
+            ("Leva Finanziaria",     str(debito.get("leva_finanziaria", "N/D"))),
+            ("Scadenze",             debito.get("scadenze_principali", "N/D") or "N/D"),
+        ]
+        add_kpi_table(doc, kpi_deb)
+
+        # ── Sezioni testuali ──────────────────────────────────────────────────
+        for label, campo in [
+            ("Overview",       "overview"),
+            ("Core Business",  "core_business"),
+            ("Mercati",        "mercati"),
+            ("Ownership",      None),
+            ("Operazioni M&A", None),
+            ("Note Aggiuntive","note_aggiuntive"),
+        ]:
+            if campo:
+                testo = report.get(campo, "N/D") or "N/D"
+            elif label == "Ownership":
+                own = report.get("ownership", {})
+                if isinstance(own, dict):
+                    testo = (f"Azionista principale: {own.get('azionista_principale','N/D')} "
+                             f"({own.get('quota_principale','N/D')}). "
+                             f"{own.get('struttura_controllo','')}")
+                else:
+                    testo = str(own)
+            else:  # Operazioni M&A
+                ops = report.get("operazioni_ma", [])
+                testo = "; ".join(
+                    f"{o.get('anno','')} — {o.get('tipo','')} — {o.get('descrizione','')}"
+                    for o in ops
+                    if o.get("descrizione","N/D") != "N/D"
+                ) or "N/D"
+
+            if testo and testo != "N/D":
+                add_heading(label, level=2)
+                p = doc.add_paragraph(testo)
+                p.runs[0].font.size = Pt(10)
+                p.paragraph_format.space_after = Pt(6)
+
+    # ── Footer nota metodologica ──────────────────────────────────────────────
+    doc.add_page_break()
+    add_heading("Note Metodologiche", level=1, color_hex="999999")
+    p = doc.add_paragraph(
+        "I dati finanziari sono stati estratti automaticamente dal bilancio tramite "
+        "analisi AI (Claude). I KPI sono stati normalizzati in euro. "
+        "Si raccomanda di verificare i valori rispetto al documento originale "
+        "prima di qualsiasi utilizzo professionale. "
+        f"Report generato il {datetime.now().strftime('%d/%m/%Y alle %H:%M')}."
+    )
+    p.runs[0].font.size = Pt(9)
+    p.runs[0].font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
 # ── Navigazione ───────────────────────────────────────────────────────────────
 
 if "pagina" not in st.session_state:
@@ -951,6 +1401,44 @@ Se un testo non è disponibile scrivi N/D."""
             progress.progress(1.0, text="Completato!")
             st.success(f"✅ {len(bilanci_pronti)} report generati e salvati!")
 
+            # ── Pulsanti export ───────────────────────────────────────────────
+            reports_list = [
+                item["report"]
+                for item in st.session_state.get("reports_generati", [])
+                if item.get("report")
+            ]
+            if reports_list:
+                nome_file = reports_list[0].get("nome_azienda", "report").replace(" ", "_")
+                data_oggi_str = datetime.now().strftime("%Y%m%d")
+
+                col_xl, col_wd = st.columns(2)
+
+                with col_xl:
+                    try:
+                        excel_bytes = genera_excel(reports_list)
+                        st.download_button(
+                            label="📥 Scarica Excel",
+                            data=excel_bytes,
+                            file_name=f"TaxiReport_{nome_file}_{data_oggi_str}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+                    except Exception as e:
+                        st.error(f"Errore Excel: {e}")
+
+                with col_wd:
+                    try:
+                        word_bytes = genera_word(reports_list)
+                        st.download_button(
+                            label="📄 Scarica Word",
+                            data=word_bytes,
+                            file_name=f"TaxiReport_{nome_file}_{data_oggi_str}.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            use_container_width=True,
+                        )
+                    except Exception as e:
+                        st.error(f"Errore Word: {e}")
+
         # ── Caso B: solo documenti supplementari (comportamento originale) ────
         else:
             nome_azienda = st.text_input(
@@ -1144,6 +1632,42 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                         render_pannello_validazione(yoy_warnings)
 
             st.markdown("---")
+
+    # ── Bottoni download (se ci sono report generati) ─────────────────────────
+    if st.session_state.get("reports_generati"):
+        reports_list = st.session_state["reports_generati"]
+        st.markdown("### 💾 Esporta")
+        col_xl, col_wd = st.columns(2)
+
+        with col_xl:
+            try:
+                excel_bytes = genera_excel(reports_list)
+                nome_file_xl = f"TaxiReport_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                st.download_button(
+                    label="📊 Scarica Excel",
+                    data=excel_bytes,
+                    file_name=nome_file_xl,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Errore generazione Excel: {e}")
+
+        with col_wd:
+            try:
+                word_bytes = genera_word(reports_list)
+                nome_file_wd = f"TaxiReport_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+                st.download_button(
+                    label="📄 Scarica Word",
+                    data=word_bytes,
+                    file_name=nome_file_wd,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Errore generazione Word: {e}")
+
+        st.markdown("---")
 
     # Compatibilità con singolo report (sessione precedente o caso B)
     elif "report" in st.session_state and "reports_generati" not in st.session_state:
