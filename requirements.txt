@@ -1,9 +1,8 @@
 streamlit
 anthropic
-pypdf2
+pdfplumber==0.11.4
+pypdf==5.1.0
+PyPDF2
 requests
-pytesseract
-pdf2image
-Pillow
 gspread
 google-auth
