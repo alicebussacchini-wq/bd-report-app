@@ -532,6 +532,9 @@ if st.session_state["pagina"] == "genera":
         lingua_prompt = "in inglese" if lingua == "English" else "in italiano"
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
+        # Reset lista report per questa nuova generazione
+        st.session_state["reports_generati"] = []
+
         # ── Caso A: uno o più bilanci caricati → report per ciascuno ─────────
         if bilanci_pronti:
             totale = len(bilanci_pronti)
@@ -653,7 +656,6 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
 
             progress.progress(1.0, text="Completato!")
             st.success(f"✅ {len(bilanci_pronti)} report generati e salvati!")
-            st.rerun()
 
         # ── Caso B: solo documenti supplementari (comportamento originale) ────
         else:
@@ -714,7 +716,6 @@ Rispondi SOLO con un oggetto JSON valido:
 
 Se un dato non è disponibile scrivi N/D. Non inventare dati."""
 
-                    time.sleep(60)
                     try:
                         messaggio = client.messages.create(
                             model="claude-haiku-4-5-20251001",
@@ -728,9 +729,12 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                                 risposta = risposta[4:]
                         report = json.loads(risposta.strip())
                         salva_report(nome_azienda, report, documenti_binari)
-                        st.session_state["report"] = report
+                        st.session_state["reports_generati"] = [{
+                            "nome": nome_azienda,
+                            "anno": "",
+                            "report": report,
+                        }]
                         st.success("✅ Report generato e salvato!")
-                        st.rerun()
                     except Exception as e:
                         st.error(f"Errore: {type(e).__name__}: {str(e)}")
 
