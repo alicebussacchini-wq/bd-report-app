@@ -114,8 +114,8 @@ FINANCIAL_KEYWORDS = [
     ("31/12/",                       5),
 ]
 
-SCORE_THRESHOLD = 8
-CONTEXT_PAGES = 1
+SCORE_THRESHOLD = 12
+CONTEXT_PAGES = 0
 
 # ── Funzioni PDF intelligente ─────────────────────────────────────────────────
 
@@ -181,7 +181,13 @@ def analizza_pdf(pdf_bytes: bytes) -> dict:
                 relevant = set(range(start, end))
                 result["mode"] = "fallback"
 
-            result["selected_pages"] = sorted(relevant)
+            # Cap massimo 25 pagine per rispettare i rate limit API
+            selected_sorted = sorted(relevant)
+            if len(selected_sorted) > 25:
+                # Tieni le pagine con punteggio più alto
+                scored = sorted(selected_sorted, key=lambda i: scores[i], reverse=True)
+                selected_sorted = sorted(scored[:25])
+            result["selected_pages"] = selected_sorted
 
             # Sezioni identificate
             all_text = " ".join(texts).lower()
@@ -548,6 +554,9 @@ if st.session_state["pagina"] == "genera":
                 pagine_inviate = len(info.get("selected_pages", []))
                 totale_pagine = info.get("total_pages", 0)
 
+                if idx > 0:
+                    time.sleep(5)  # pausa tra bilanci per evitare rate limit
+
                 progress.progress(
                     idx / totale,
                     text=f"Analisi {idx+1}/{totale}: {nome} ({anno})..."
@@ -613,7 +622,7 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                 for tentativo in range(3):
                     try:
                         messaggio = client.messages.create(
-                            model="claude-haiku-4-5-20251001",
+                            model="claude-sonnet-4-6",
                             max_tokens=4000,
                             messages=[{"role": "user", "content": [
                                 {
