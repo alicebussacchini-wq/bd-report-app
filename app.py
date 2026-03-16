@@ -117,6 +117,273 @@ FINANCIAL_KEYWORDS = [
 SCORE_THRESHOLD = 12
 CONTEXT_PAGES = 0
 
+# ── Normalizzazione e validazione KPI ────────────────────────────────────────
+
+# Fattori di conversione verso EURO INTERI
+UNIT_FACTORS = {
+    "euro": 1,
+    "eur": 1,
+    "€": 1,
+    "migliaia di euro": 1_000,
+    "migliaia": 1_000,
+    "k€": 1_000,
+    "milioni di euro": 1_000_000,
+    "milioni": 1_000_000,
+    "mln": 1_000_000,
+    "mln€": 1_000_000,
+    "miliardi di euro": 1_000_000_000,
+    "miliardi": 1_000_000_000,
+}
+
+KPI_NUMERICI = [
+    "ricavi", "ebitda", "ebit", "utile_netto", "ammortamenti",
+    "totale_attivo", "patrimonio_netto", "cassa",
+    "indebitamento_totale", "debito_bancario", "obbligazioni", "debito_netto",
+]
+
+def normalizza_kpi(report: dict) -> dict:
+    """
+    Normalizza tutti i KPI numerici a euro interi.
+    Aggiunge campo '_normalizzato': True e '_unita_originale' al report.
+    """
+    fin = report.get("dati_finanziari", {})
+    debito = report.get("struttura_debito", {})
+
+    unita_raw = str(fin.get("unita", "migliaia di euro")).lower().strip()
+    fattore = UNIT_FACTORS.get(unita_raw, None)
+
+    # Prova match parziale se non trova esatto
+    if fattore is None:
+        for chiave, val in UNIT_FACTORS.items():
+            if chiave in unita_raw:
+                fattore = val
+                break
+    if fattore is None:
+        fattore = 1_000  # default migliaia se non riconosciuto
+
+    def converti(v):
+        if v is None or v == "N/D" or v == "":
+            return None
+        try:
+            return float(v) * fattore
+        except (TypeError, ValueError):
+            # Prova a estrarre il numero dalla stringa
+            import re
+            nums = re.findall(r"-?[\d.,]+", str(v))
+            if nums:
+                num_str = nums[0].replace(".", "").replace(",", ".")
+                try:
+                    return float(num_str) * fattore
+                except ValueError:
+                    pass
+        return None
+
+    # Normalizza dati finanziari
+    fin_norm = {k: v for k, v in fin.items()}
+    for campo in ["ricavi", "ebitda", "ebit", "utile_netto", "ammortamenti",
+                  "totale_attivo", "patrimonio_netto", "cassa"]:
+        fin_norm[campo] = converti(fin.get(campo))
+    fin_norm["unita"] = "euro"
+    fin_norm["_unita_originale"] = unita_raw
+    fin_norm["_fattore"] = fattore
+
+    # Normalizza struttura debito
+    debito_norm = {k: v for k, v in debito.items()}
+    for campo in ["indebitamento_totale", "debito_bancario", "obbligazioni", "debito_netto"]:
+        debito_norm[campo] = converti(debito.get(campo))
+
+    report["dati_finanziari"] = fin_norm
+    report["struttura_debito"] = debito_norm
+    report["_normalizzato"] = True
+    return report
+
+
+def valida_kpi(report: dict) -> list:
+    """
+    Esegue check di validazione sui KPI normalizzati.
+    Restituisce una lista di warning (dict con 'livello', 'campo', 'messaggio').
+    Livelli: 'error' (identità contabile violata), 'warning' (anomalia).
+    """
+    warnings = []
+    fin = report.get("dati_finanziari", {})
+    debito = report.get("struttura_debito", {})
+
+    def get(d, k):
+        v = d.get(k)
+        return float(v) if v is not None else None
+
+    ricavi      = get(fin, "ricavi")
+    ebitda      = get(fin, "ebitda")
+    ebit        = get(fin, "ebit")
+    amm         = get(fin, "ammortamenti")
+    utile       = get(fin, "utile_netto")
+    attivo      = get(fin, "totale_attivo")
+    pn          = get(fin, "patrimonio_netto")
+    cassa       = get(fin, "cassa")
+    deb_netto   = get(debito, "debito_netto")
+    deb_tot     = get(debito, "indebitamento_totale")
+
+    # ── Check identità contabili ─────────────────────────────────────────────
+
+    # EBITDA = EBIT + Ammortamenti (tolleranza 5%)
+    if ebitda is not None and ebit is not None and amm is not None:
+        atteso = ebit + amm
+        if atteso != 0 and abs(ebitda - atteso) / abs(atteso) > 0.05:
+            warnings.append({
+                "livello": "error",
+                "campo": "EBITDA",
+                "messaggio": f"EBITDA ({_fmt(ebitda)}) ≠ EBIT ({_fmt(ebit)}) + Amm. ({_fmt(amm)}) = {_fmt(atteso)}"
+            })
+
+    # Patrimonio Netto deve essere < Totale Attivo
+    if pn is not None and attivo is not None and attivo > 0:
+        if pn > attivo:
+            warnings.append({
+                "livello": "error",
+                "campo": "Patrimonio Netto",
+                "messaggio": f"Patrimonio netto ({_fmt(pn)}) > Totale attivo ({_fmt(attivo)}) — impossibile"
+            })
+
+    # ── Check anomalie di valore ─────────────────────────────────────────────
+
+    # Margine EBITDA fuori range ragionevole (-50% / +80%)
+    if ebitda is not None and ricavi is not None and ricavi > 0:
+        margine = ebitda / ricavi
+        if margine < -0.5 or margine > 0.8:
+            warnings.append({
+                "livello": "warning",
+                "campo": "Margine EBITDA",
+                "messaggio": f"Margine EBITDA {margine*100:.1f}% fuori range normale (-50%/+80%) — verificare unità"
+            })
+
+    # Cassa > Totale Attivo (impossibile)
+    if cassa is not None and attivo is not None and attivo > 0:
+        if cassa > attivo:
+            warnings.append({
+                "livello": "error",
+                "campo": "Cassa",
+                "messaggio": f"Cassa ({_fmt(cassa)}) > Totale attivo ({_fmt(attivo)}) — errore di estrazione"
+            })
+
+    # Ricavi negativi (quasi sempre errore)
+    if ricavi is not None and ricavi < 0:
+        warnings.append({
+            "livello": "warning",
+            "campo": "Ricavi",
+            "messaggio": f"Ricavi negativi ({_fmt(ricavi)}) — verificare il dato estratto"
+        })
+
+    # Debito netto molto alto vs patrimonio netto (leva > 10x)
+    if deb_netto is not None and pn is not None and pn > 0:
+        leva = deb_netto / pn
+        if leva > 10:
+            warnings.append({
+                "livello": "warning",
+                "campo": "Leva finanziaria",
+                "messaggio": f"Leva {leva:.1f}x molto elevata — possibile errore di estrazione"
+            })
+
+    return warnings
+
+
+def confronta_anni(report_nuovo: dict, report_vecchio: dict) -> list:
+    """
+    Confronta due report dello stesso soggetto (anni diversi).
+    Restituisce warning per variazioni YoY anomale (>200%).
+    """
+    warnings = []
+    fin_n = report_nuovo.get("dati_finanziari", {})
+    fin_v = report_vecchio.get("dati_finanziari", {})
+
+    for campo in ["ricavi", "ebitda", "utile_netto", "totale_attivo", "patrimonio_netto"]:
+        v_nuovo = fin_n.get(campo)
+        v_vecchio = fin_v.get(campo)
+        if v_nuovo is None or v_vecchio is None:
+            continue
+        try:
+            v_nuovo, v_vecchio = float(v_nuovo), float(v_vecchio)
+        except (TypeError, ValueError):
+            continue
+        if v_vecchio == 0:
+            continue
+        variazione = (v_nuovo - v_vecchio) / abs(v_vecchio)
+        if abs(variazione) > 2.0:  # >200% YoY
+            warnings.append({
+                "livello": "warning",
+                "campo": campo.replace("_", " ").title(),
+                "messaggio": f"Variazione YoY {variazione*100:+.0f}% — possibile errore di estrazione o cambio unità"
+            })
+    return warnings
+
+
+def _fmt(v):
+    """Formatta un numero in euro in modo leggibile."""
+    if v is None:
+        return "N/D"
+    try:
+        v = float(v)
+        if abs(v) >= 1_000_000_000:
+            return f"€ {v/1_000_000_000:.2f}B"
+        elif abs(v) >= 1_000_000:
+            return f"€ {v/1_000_000:.1f}M"
+        elif abs(v) >= 1_000:
+            return f"€ {v/1_000:.0f}K"
+        else:
+            return f"€ {v:.0f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def fmt_kpi(report: dict, campo: str, sezione: str = "dati_finanziari") -> str:
+    """
+    Formatta un KPI per la visualizzazione.
+    Se il report è normalizzato usa _fmt, altrimenti usa il valore grezzo.
+    """
+    sezione_dict = report.get(sezione, {})
+    v = sezione_dict.get(campo)
+    if report.get("_normalizzato") and v is not None:
+        return _fmt(v)
+    if v is None:
+        return "N/D"
+    return str(v)
+
+
+def render_pannello_validazione(warnings: list):
+    """Renderizza il pannello di qualità estrazione con semaforo."""
+    if not warnings:
+        st.markdown(
+            '<div style="background:#1a2e1a;border:1px solid #4caf50;border-radius:8px;'
+            'padding:10px 14px;margin:8px 0;color:#4caf50;font-size:13px;">'
+            '✅ <b>Validazione OK</b> — tutti i check superati</div>',
+            unsafe_allow_html=True
+        )
+        return
+
+    errori = [w for w in warnings if w["livello"] == "error"]
+    avvisi = [w for w in warnings if w["livello"] == "warning"]
+
+    if errori:
+        colore, icona, label = "#c62828", "🔴", "Errori rilevati"
+        bg = "#2e1a1a"
+    else:
+        colore, icona, label = "#e65100", "🟡", "Anomalie da verificare"
+        bg = "#2e2a1a"
+
+    items_html = "".join(
+        f'<div style="margin:4px 0;font-size:12px;">'
+        f'{"🔴" if w["livello"]=="error" else "🟡"} '
+        f'<b>{w["campo"]}</b>: {w["messaggio"]}</div>'
+        for w in warnings
+    )
+    st.markdown(
+        f'<div style="background:{bg};border:1px solid {colore};border-radius:8px;'
+        f'padding:10px 14px;margin:8px 0;">'
+        f'<div style="color:{colore};font-weight:700;margin-bottom:6px;">{icona} {label}</div>'
+        f'{items_html}</div>',
+        unsafe_allow_html=True
+    )
+
+
 # ── Funzioni PDF intelligente ─────────────────────────────────────────────────
 
 def _score_page(text: str) -> int:
@@ -580,7 +847,15 @@ Analizza il bilancio allegato di **{nome}** (esercizio {anno}) e, se presenti, i
 Produci un report strutturato in JSON, con tutti i testi {lingua_prompt}.
 {testo_suppl}
 
-Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo:
+Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo.
+
+REGOLE CRITICHE PER I VALORI NUMERICI:
+- Tutti i valori in "dati_finanziari" e "struttura_debito" devono essere NUMERI PURI (es. 1234567), mai stringhe
+- Indica l'unità di misura usata nel bilancio nel campo "unita" (es. "migliaia di euro", "milioni di euro", "euro")
+- Converti TUTTI i valori nella stessa unità dichiarata in "unita"
+- I valori negativi (perdite, debito netto) devono avere il segno negativo (es. -5000)
+- Se un valore non è presente nel documento usa null, MAI 0 o "N/D"
+- Non inventare valori: meglio null che un numero sbagliato
 
 {{
   "nome_azienda": "{nome}",
@@ -588,19 +863,23 @@ Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo
   "core_business": "",
   "mercati": "",
   "dati_finanziari": {{
-    "ricavi": "",
-    "ebitda": "",
-    "utile_netto": "",
-    "totale_attivo": "",
-    "patrimonio_netto": "",
+    "unita": "migliaia di euro",
+    "ricavi": null,
+    "ebitda": null,
+    "ebit": null,
+    "utile_netto": null,
+    "ammortamenti": null,
+    "totale_attivo": null,
+    "patrimonio_netto": null,
+    "cassa": null,
     "anno_riferimento": "{anno}"
   }},
   "struttura_debito": {{
-    "indebitamento_totale": "",
-    "debito_bancario": "",
-    "obbligazioni": "",
-    "debito_netto": "",
-    "leva_finanziaria": "",
+    "indebitamento_totale": null,
+    "debito_bancario": null,
+    "obbligazioni": null,
+    "debito_netto": null,
+    "leva_finanziaria": null,
     "scadenze_principali": "",
     "note": ""
   }},
@@ -617,7 +896,7 @@ Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo
   "note_aggiuntive": ""
 }}
 
-Se un dato non è disponibile scrivi N/D. Non inventare dati."""
+Se un testo non è disponibile scrivi N/D."""
 
                 for tentativo in range(3):
                     try:
@@ -642,6 +921,12 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                             if risposta.startswith("json"):
                                 risposta = risposta[4:]
                         report = json.loads(risposta.strip())
+
+                        # Normalizza KPI a euro interi e valida
+                        report = normalizza_kpi(report)
+                        kpi_warnings = valida_kpi(report)
+                        report["_validation_warnings"] = kpi_warnings
+
                         salva_report(nome, report, documenti_binari)
 
                         # Salva in session_state (lista per multi-report)
@@ -758,13 +1043,29 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
             fin = report.get("dati_finanziari", {})
 
             st.markdown(f"## 📋 {nome_r} — {anno_r}")
+
+            # Pannello validazione
+            kpi_warnings = report.get("_validation_warnings", [])
+            render_pannello_validazione(kpi_warnings)
+
+            # Calcolo margine EBITDA
+            r_val = fin.get("ricavi")
+            e_val = fin.get("ebitda")
+            margine_str = "N/D"
+            if r_val and e_val and report.get("_normalizzato"):
+                try:
+                    margine_str = f"{float(e_val)/float(r_val)*100:.1f}%"
+                except:
+                    pass
+
             st.markdown(f"""
             <div class="kpi-grid">
-                <div class="kpi-card"><div class="kpi-label">Ricavi</div><div class="kpi-value">{fin.get('ricavi','N/D')}</div></div>
-                <div class="kpi-card"><div class="kpi-label">EBITDA</div><div class="kpi-value">{fin.get('ebitda','N/D')}</div></div>
-                <div class="kpi-card"><div class="kpi-label">Utile Netto</div><div class="kpi-value">{fin.get('utile_netto','N/D')}</div></div>
-                <div class="kpi-card"><div class="kpi-label">Totale Attivo</div><div class="kpi-value">{fin.get('totale_attivo','N/D')}</div></div>
-                <div class="kpi-card"><div class="kpi-label">Patrimonio Netto</div><div class="kpi-value">{fin.get('patrimonio_netto','N/D')}</div></div>
+                <div class="kpi-card"><div class="kpi-label">Ricavi</div><div class="kpi-value">{fmt_kpi(report,'ricavi')}</div></div>
+                <div class="kpi-card"><div class="kpi-label">EBITDA</div><div class="kpi-value">{fmt_kpi(report,'ebitda')}</div></div>
+                <div class="kpi-card"><div class="kpi-label">Margine EBITDA</div><div class="kpi-value">{margine_str}</div></div>
+                <div class="kpi-card"><div class="kpi-label">Utile Netto</div><div class="kpi-value">{fmt_kpi(report,'utile_netto')}</div></div>
+                <div class="kpi-card"><div class="kpi-label">Totale Attivo</div><div class="kpi-value">{fmt_kpi(report,'totale_attivo')}</div></div>
+                <div class="kpi-card"><div class="kpi-label">Patrimonio Netto</div><div class="kpi-value">{fmt_kpi(report,'patrimonio_netto')}</div></div>
                 <div class="kpi-card"><div class="kpi-label">Anno Rif.</div><div class="kpi-value">{fin.get('anno_riferimento','N/D')}</div></div>
             </div>
             """, unsafe_allow_html=True)
@@ -781,10 +1082,10 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                 if isinstance(debito, dict):
                     st.markdown(f"""
                     <div class="kpi-grid">
-                        <div class="kpi-card"><div class="kpi-label">Indebitamento Totale</div><div class="kpi-value">{debito.get('indebitamento_totale','N/D')}</div></div>
-                        <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{debito.get('debito_bancario','N/D')}</div></div>
-                        <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{debito.get('obbligazioni','N/D')}</div></div>
-                        <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{debito.get('debito_netto','N/D')}</div></div>
+                        <div class="kpi-card"><div class="kpi-label">Indebitamento Totale</div><div class="kpi-value">{fmt_kpi(report,'indebitamento_totale','struttura_debito')}</div></div>
+                        <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{fmt_kpi(report,'debito_bancario','struttura_debito')}</div></div>
+                        <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{fmt_kpi(report,'obbligazioni','struttura_debito')}</div></div>
+                        <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{fmt_kpi(report,'debito_netto','struttura_debito')}</div></div>
                         <div class="kpi-card"><div class="kpi-label">Leva Finanziaria</div><div class="kpi-value">{debito.get('leva_finanziaria','N/D')}</div></div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -828,6 +1129,19 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
 
             with st.expander("📝 Note Aggiuntive"):
                 st.markdown(f'<div class="section-box"><div class="section-text">{report.get("note_aggiuntive","N/D")}</div></div>', unsafe_allow_html=True)
+
+            # Confronto YoY se ci sono più report dello stesso soggetto
+            reports_stesso_soggetto = [
+                r for r in st.session_state.get("reports_generati", [])
+                if r["nome"] == nome_r and r["anno"] != anno_r
+            ]
+            if reports_stesso_soggetto:
+                yoy_warnings = []
+                for r_prec in reports_stesso_soggetto:
+                    yoy_warnings += confronta_anni(report, r_prec["report"])
+                if yoy_warnings:
+                    with st.expander("📊 Variazioni YoY anomale", expanded=True):
+                        render_pannello_validazione(yoy_warnings)
 
             st.markdown("---")
 
