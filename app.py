@@ -12,7 +12,6 @@ import gspread
 from pypdf import PdfReader, PdfWriter
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-from export import genera_excel, genera_word
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
