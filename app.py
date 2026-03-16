@@ -174,15 +174,27 @@ def normalizza_kpi(report: dict) -> dict:
         try:
             return float(v) * fattore
         except (TypeError, ValueError):
-            # Prova a estrarre il numero dalla stringa
-            import re
-            nums = re.findall(r"-?[\d.,]+", str(v))
-            if nums:
-                num_str = nums[0].replace(".", "").replace(",", ".")
-                try:
-                    return float(num_str) * fattore
-                except ValueError:
-                    pass
+            pass
+        # Prova a estrarre numero e unità dalla stringa (es. "€ 1.2 miliardi")
+        import re
+        s = str(v).lower().strip()
+        # Fattore dalla stringa stessa (per report vecchi senza campo "unita")
+        str_factor = 1
+        if "miliard" in s:
+            str_factor = 1_000_000_000
+        elif "milion" in s or " mln" in s or "mln " in s:
+            str_factor = 1_000_000
+        elif "migliaia" in s or " k" in s or "k€" in s:
+            str_factor = 1_000
+        # Se abbiamo già un fattore dalla stringa, non moltiplicare anche per fattore unità
+        effective_factor = str_factor if str_factor > 1 else fattore
+        nums = re.findall(r"-?[\d][\d.,]*", s)
+        if nums:
+            num_str = nums[0].replace(".", "").replace(",", ".")
+            try:
+                return float(num_str) * effective_factor
+            except ValueError:
+                pass
         return None
 
     # Normalizza dati finanziari
@@ -569,6 +581,10 @@ def carica_archivio():
             if len(riga) >= 3 and riga[2]:
                 try:
                     report = json.loads(riga[2])
+                    # Normalizza sempre i KPI al caricamento,
+                    # così i report vecchi (pre-M2) vengono convertiti on-the-fly
+                    if not report.get("_normalizzato"):
+                        report = normalizza_kpi(report)
                     reports.append({
                         "data": riga[0],
                         "nome": riga[1],
