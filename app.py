@@ -1024,18 +1024,78 @@ def genera_word(reports: list) -> bytes:
     doc.save(buf)
     return buf.getvalue()
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BENCHMARK DI SETTORE (statico)
+# ══════════════════════════════════════════════════════════════════════════════
+
+BENCHMARK_SETTORE = {
+    "Farmaceutico / Healthcare": {
+        "margine_ebitda": (0.18, 0.28),
+        "margine_utile":  (0.08, 0.15),
+        "leva":           (1.0,  3.0),
+    },
+    "Manifatturiero": {
+        "margine_ebitda": (0.08, 0.16),
+        "margine_utile":  (0.03, 0.08),
+        "leva":           (1.5,  4.0),
+    },
+    "Retail / Grande Distribuzione": {
+        "margine_ebitda": (0.04, 0.10),
+        "margine_utile":  (0.01, 0.04),
+        "leva":           (2.0,  5.0),
+    },
+    "Technology / Software": {
+        "margine_ebitda": (0.15, 0.35),
+        "margine_utile":  (0.08, 0.20),
+        "leva":           (0.0,  2.0),
+    },
+    "Energia / Utilities": {
+        "margine_ebitda": (0.20, 0.40),
+        "margine_utile":  (0.05, 0.12),
+        "leva":           (3.0,  6.0),
+    },
+    "Costruzioni / Real Estate": {
+        "margine_ebitda": (0.08, 0.18),
+        "margine_utile":  (0.03, 0.08),
+        "leva":           (2.0,  6.0),
+    },
+    "Alimentare / Bevande": {
+        "margine_ebitda": (0.10, 0.20),
+        "margine_utile":  (0.04, 0.10),
+        "leva":           (1.0,  3.5),
+    },
+}
+
+def _benchmark_cell(valore, bm_range):
+    """Restituisce (testo, colore) per una cella benchmark."""
+    if valore is None or bm_range is None:
+        return "—", "#666"
+    lo, hi = bm_range
+    if lo <= valore <= hi:
+        return "✅ In range", "#4caf50"
+    elif valore < lo:
+        diff = (lo - valore) / lo * 100
+        return f"🔴 -{diff:.0f}% vs mediana", "#ef5350"
+    else:
+        diff = (valore - hi) / hi * 100
+        return f"🟡 +{diff:.0f}% vs mediana", "#ffa726"
+
 # ── Navigazione ───────────────────────────────────────────────────────────────
 
 if "pagina" not in st.session_state:
     st.session_state["pagina"] = "genera"
 
-col_nav1, col_nav2 = st.columns(2)
+col_nav1, col_nav2, col_nav3 = st.columns(3)
 with col_nav1:
-    if st.button("➕ Genera nuovo report"):
+    if st.button("➕ Genera nuovo report", use_container_width=True):
         st.session_state["pagina"] = "genera"
 with col_nav2:
-    if st.button("🗂️ Archivio report"):
+    if st.button("🗂️ Archivio report", use_container_width=True):
         st.session_state["pagina"] = "archivio"
+with col_nav3:
+    if st.button("📊 Confronta aziende", use_container_width=True):
+        st.session_state["pagina"] = "archivio"  # apre archivio sul tab confronta
 
 st.markdown("---")
 
@@ -1746,47 +1806,234 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
             st.markdown(f'<div class="section-box"><div class="section-text">{report.get("note_aggiuntive","N/D")}</div></div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGINA: ARCHIVIO
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif st.session_state["pagina"] == "archivio":
 
-    st.markdown("### 🗂️ Archivio Report")
-    reports = carica_archivio()
+    tab_archivio, tab_confronta = st.tabs(["🗂️ Archivio", "📊 Confronta aziende"])
 
-    if not reports:
-        st.info("Nessun report salvato. Genera il tuo primo report!")
-    else:
-        for item in reports:
-            r = item["report"]
-            fin = r.get("dati_finanziari", {})
+    # ── TAB ARCHIVIO ──────────────────────────────────────────────────────────
+    with tab_archivio:
+        reports_arch = carica_archivio()
 
-            st.markdown(f"""
-            <div class="archivio-card">
-                <div class="archivio-nome">{r.get('nome_azienda','')}</div>
-                <div class="archivio-data">📅 {item['data']}</div>
-                <div class="archivio-kpi">
-                    <div class="archivio-kpi-item"><span class="archivio-kpi-label">Ricavi</span><span class="archivio-kpi-val">{fin.get('ricavi','N/D')}</span></div>
-                    <div class="archivio-kpi-item"><span class="archivio-kpi-label">EBITDA</span><span class="archivio-kpi-val">{fin.get('ebitda','N/D')}</span></div>
-                    <div class="archivio-kpi-item"><span class="archivio-kpi-label">Utile Netto</span><span class="archivio-kpi-val">{fin.get('utile_netto','N/D')}</span></div>
-                    <div class="archivio-kpi-item"><span class="archivio-kpi-label">Anno</span><span class="archivio-kpi-val">{fin.get('anno_riferimento','N/D')}</span></div>
+        if not reports_arch:
+            st.info("Nessun report salvato. Genera il tuo primo report!")
+        else:
+            # Ricerca
+            cerca = st.text_input("🔍 Cerca per nome azienda", placeholder="es. Angelini...",
+                                  label_visibility="collapsed")
+            if cerca:
+                reports_arch = [x for x in reports_arch
+                                if cerca.lower() in x.get("nome","").lower()
+                                or cerca.lower() in x["report"].get("nome_azienda","").lower()]
+
+            st.caption(f"{len(reports_arch)} report trovati")
+
+            for item in reports_arch:
+                r   = item["report"]
+                fin = r.get("dati_finanziari", {})
+                nome_az = r.get("nome_azienda", item.get("nome", "—"))
+                anno_az = fin.get("anno_riferimento", "—")
+                warnings_count = len(r.get("_validation_warnings", []))
+                warn_badge = (f' <span style="color:#e65100;font-size:11px;">'
+                              f'⚠️ {warnings_count} warning</span>'
+                              if warnings_count else "")
+
+                st.markdown(f"""
+                <div class="archivio-card">
+                    <div class="archivio-nome">{nome_az}{warn_badge}</div>
+                    <div class="archivio-data">📅 {item["data"]} &nbsp;|&nbsp; Anno bilancio: {anno_az}</div>
+                    <div class="archivio-kpi">
+                        <div class="archivio-kpi-item">
+                            <span class="archivio-kpi-label">Ricavi</span>
+                            <span class="archivio-kpi-val">{_fmt(fin.get("ricavi"))}</span>
+                        </div>
+                        <div class="archivio-kpi-item">
+                            <span class="archivio-kpi-label">EBITDA</span>
+                            <span class="archivio-kpi-val">{_fmt(fin.get("ebitda"))}</span>
+                        </div>
+                        <div class="archivio-kpi-item">
+                            <span class="archivio-kpi-label">Utile Netto</span>
+                            <span class="archivio-kpi-val">{_fmt(fin.get("utile_netto"))}</span>
+                        </div>
+                        <div class="archivio-kpi-item">
+                            <span class="archivio-kpi-label">PN</span>
+                            <span class="archivio-kpi-val">{_fmt(fin.get("patrimonio_netto"))}</span>
+                        </div>
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-            col_a, col_b, col_c = st.columns([1, 1, 4])
-            with col_a:
-                if st.button("📖 Apri", key=f"apri_{item['riga']}"):
-                    st.session_state["report"] = r
-                    st.session_state.pop("reports_generati", None)
-                    st.session_state["pagina"] = "genera"
-                    st.rerun()
-            with col_b:
-                if st.button("🗑️ Elimina", key=f"elimina_{item['riga']}"):
-                    try:
-                        sheet = get_sheet()
-                        sheet.delete_rows(item["riga"])
-                        st.success("Report eliminato.")
+                col_a, col_b, col_c = st.columns([1, 1, 4])
+                with col_a:
+                    if st.button("📖 Apri", key=f"apri_{item['riga']}"):
+                        st.session_state["report"] = r
+                        st.session_state.pop("reports_generati", None)
+                        st.session_state["pagina"] = "genera"
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore: {e}")
+                with col_b:
+                    if st.button("🗑️ Elimina", key=f"elimina_{item['riga']}"):
+                        try:
+                            sheet = get_sheet()
+                            sheet.delete_rows(item["riga"])
+                            st.success("Report eliminato.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Errore: {e}")
+
+    # ── TAB CONFRONTA ─────────────────────────────────────────────────────────
+    with tab_confronta:
+        reports_tutti = carica_archivio()
+
+        if len(reports_tutti) < 2:
+            st.info("Servono almeno 2 report in archivio per confrontare.")
+        else:
+            # Selezione aziende
+            opzioni = [
+                f"{x['report'].get('nome_azienda', x.get('nome','—'))} "
+                f"({x['report'].get('dati_finanziari',{}).get('anno_riferimento','—')})"
+                for x in reports_tutti
+            ]
+            selezionati = st.multiselect(
+                "Seleziona 2-5 aziende/anni da confrontare",
+                options=opzioni,
+                max_selections=5,
+            )
+
+            # Benchmark settore opzionale
+            settore_sel = st.selectbox(
+                "Benchmark di settore (opzionale)",
+                options=["— Nessun benchmark —"] + list(BENCHMARK_SETTORE.keys()),
+            )
+            bm = BENCHMARK_SETTORE.get(settore_sel) if settore_sel != "— Nessun benchmark —" else None
+
+            if len(selezionati) < 2:
+                st.caption("Seleziona almeno 2 aziende per visualizzare il confronto.")
+            else:
+                # Recupera i report selezionati
+                idx_sel = [opzioni.index(s) for s in selezionati]
+                sel_reports = [reports_tutti[i] for i in idx_sel]
+
+                st.markdown("---")
+                st.markdown("#### Tabella comparativa")
+
+                # Righe KPI da confrontare
+                kpi_conf = [
+                    ("Ricavi",            "dati_finanziari",  "ricavi",             None),
+                    ("EBITDA",            "dati_finanziari",  "ebitda",             None),
+                    ("Margine EBITDA",    None,               "_margine_ebitda",    "margine_ebitda"),
+                    ("EBIT",              "dati_finanziari",  "ebit",               None),
+                    ("Utile Netto",       "dati_finanziari",  "utile_netto",        None),
+                    ("Margine Utile",     None,               "_margine_utile",     "margine_utile"),
+                    ("Totale Attivo",     "dati_finanziari",  "totale_attivo",      None),
+                    ("Patrimonio Netto",  "dati_finanziari",  "patrimonio_netto",   None),
+                    ("Debito Netto",      "struttura_debito", "debito_netto",       None),
+                    ("Leva (x)",          "struttura_debito", "leva_finanziaria",   "leva"),
+                ]
+
+                # Intestazione tabella
+                header_cols = st.columns([2] + [2] * len(sel_reports) + ([1] if bm else []))
+                header_cols[0].markdown("**KPI**")
+                for j, s in enumerate(selezionati):
+                    header_cols[j+1].markdown(f"**{s}**")
+                if bm:
+                    header_cols[-1].markdown("**Benchmark**")
+
+                st.markdown('<hr style="border-color:#444;margin:4px 0 8px 0;">', unsafe_allow_html=True)
+
+                for label, sezione, campo, bm_key in kpi_conf:
+                    row_cols = st.columns([2] + [2] * len(sel_reports) + ([1] if bm else []))
+                    row_cols[0].markdown(f"<span style='color:#999;font-size:13px;'>{label}</span>",
+                                         unsafe_allow_html=True)
+
+                    vals = []
+                    for j, item in enumerate(sel_reports):
+                        r = item["report"]
+                        fin_c = r.get("dati_finanziari", {})
+                        deb_c = r.get("struttura_debito", {})
+                        val = None
+
+                        if campo == "_margine_ebitda":
+                            ric = fin_c.get("ricavi")
+                            ebt = fin_c.get("ebitda")
+                            if ric and ebt:
+                                try: val = float(ebt) / float(ric)
+                                except: pass
+                            display = f"{val*100:.1f}%" if val is not None else "N/D"
+                        elif campo == "_margine_utile":
+                            ric = fin_c.get("ricavi")
+                            utn = fin_c.get("utile_netto")
+                            if ric and utn:
+                                try: val = float(utn) / float(ric)
+                                except: pass
+                            display = f"{val*100:.1f}%" if val is not None else "N/D"
+                        elif sezione == "dati_finanziari":
+                            raw = fin_c.get(campo)
+                            if raw is not None:
+                                try: val = float(raw)
+                                except: pass
+                            display = _fmt(val)
+                        elif sezione == "struttura_debito":
+                            raw = deb_c.get(campo)
+                            if raw is not None:
+                                try: val = float(raw)
+                                except: pass
+                            display = f"{val:.1f}x" if (campo == "leva_finanziaria" and val) else _fmt(val)
+                        else:
+                            display = "N/D"
+
+                        vals.append(val)
+                        row_cols[j+1].markdown(
+                            f"<span style='font-size:13px;font-weight:600;"
+                            f"color:#c8e04a;'>{display}</span>",
+                            unsafe_allow_html=True
+                        )
+
+                    # Colonna benchmark
+                    if bm and bm_key and bm_key in bm:
+                        # Usa il valore medio dei selezionati per confronto
+                        valori_validi = [v for v in vals if v is not None]
+                        val_medio = sum(valori_validi)/len(valori_validi) if valori_validi else None
+                        testo_bm, colore_bm = _benchmark_cell(val_medio, bm.get(bm_key))
+                        lo, hi = bm[bm_key]
+                        range_str = (f"{lo*100:.0f}–{hi*100:.0f}%"
+                                     if "margine" in bm_key
+                                     else f"{lo:.1f}–{hi:.1f}x")
+                        row_cols[-1].markdown(
+                            f"<span style='font-size:11px;color:{colore_bm};'>"
+                            f"{testo_bm}<br>"
+                            f"<span style='color:#666;'>Range: {range_str}</span>"
+                            f"</span>",
+                            unsafe_allow_html=True
+                        )
+                    elif bm:
+                        row_cols[-1].markdown(
+                            "<span style='font-size:11px;color:#666;'>—</span>",
+                            unsafe_allow_html=True
+                        )
+
+                    st.markdown('<hr style="border-color:#2a2a2a;margin:2px 0;">', unsafe_allow_html=True)
+
+                # Export comparazione
+                st.markdown("---")
+                try:
+                    reports_export = [
+                        {"nome": x["report"].get("nome_azienda", x.get("nome","—")),
+                         "anno": x["report"].get("dati_finanziari",{}).get("anno_riferimento","—"),
+                         "report": x["report"]}
+                        for x in sel_reports
+                    ]
+                    excel_bytes = genera_excel(reports_export)
+                    st.download_button(
+                        label="📊 Scarica confronto Excel",
+                        data=excel_bytes,
+                        file_name=f"Confronto_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.error(f"Errore export: {e}")
