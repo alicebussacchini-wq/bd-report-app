@@ -1744,19 +1744,40 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
 
         st.markdown("---")
 
-    # Compatibilità con singolo report (sessione precedente o caso B)
+    # Compatibilità con singolo report (aperto dall'archivio o caso B)
     elif "report" in st.session_state and "reports_generati" not in st.session_state:
         report = st.session_state["report"]
-        fin = report.get("dati_finanziari", {})
+        # Normalizza se necessario (report vecchi pre-M2)
+        if not report.get("_normalizzato"):
+            report = normalizza_kpi(report)
+            st.session_state["report"] = report
+        fin    = report.get("dati_finanziari", {})
+        debito = report.get("struttura_debito", {})
 
         st.markdown(f"## 📋 {report.get('nome_azienda', '')}")
+
+        # Pannello validazione
+        kpi_warnings = report.get("_validation_warnings") or valida_kpi(report)
+        render_pannello_validazione(kpi_warnings)
+
+        # Margine EBITDA
+        r_val = fin.get("ricavi")
+        e_val = fin.get("ebitda")
+        margine_str = "N/D"
+        if r_val and e_val:
+            try:
+                margine_str = f"{float(e_val)/float(r_val)*100:.1f}%"
+            except:
+                pass
+
         st.markdown(f"""
         <div class="kpi-grid">
-            <div class="kpi-card"><div class="kpi-label">Ricavi</div><div class="kpi-value">{fin.get('ricavi','N/D')}</div></div>
-            <div class="kpi-card"><div class="kpi-label">EBITDA</div><div class="kpi-value">{fin.get('ebitda','N/D')}</div></div>
-            <div class="kpi-card"><div class="kpi-label">Utile Netto</div><div class="kpi-value">{fin.get('utile_netto','N/D')}</div></div>
-            <div class="kpi-card"><div class="kpi-label">Totale Attivo</div><div class="kpi-value">{fin.get('totale_attivo','N/D')}</div></div>
-            <div class="kpi-card"><div class="kpi-label">Patrimonio Netto</div><div class="kpi-value">{fin.get('patrimonio_netto','N/D')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Ricavi</div><div class="kpi-value">{fmt_kpi(report,'ricavi')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">EBITDA</div><div class="kpi-value">{fmt_kpi(report,'ebitda')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Margine EBITDA</div><div class="kpi-value">{margine_str}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Utile Netto</div><div class="kpi-value">{fmt_kpi(report,'utile_netto')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Totale Attivo</div><div class="kpi-value">{fmt_kpi(report,'totale_attivo')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Patrimonio Netto</div><div class="kpi-value">{fmt_kpi(report,'patrimonio_netto')}</div></div>
             <div class="kpi-card"><div class="kpi-label">Anno Rif.</div><div class="kpi-value">{fin.get('anno_riferimento','N/D')}</div></div>
         </div>
         """, unsafe_allow_html=True)
@@ -1769,21 +1790,20 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
             st.markdown(f'<div class="section-box"><div class="section-title">Mercati</div><div class="section-text">{report.get("mercati","N/D")}</div></div>', unsafe_allow_html=True)
 
         with st.expander("💰 Struttura del Debito"):
-            debito = report.get("struttura_debito", {})
             if isinstance(debito, dict):
                 st.markdown(f"""
                 <div class="kpi-grid">
-                    <div class="kpi-card"><div class="kpi-label">Indebitamento Totale</div><div class="kpi-value">{debito.get('indebitamento_totale','N/D')}</div></div>
-                    <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{debito.get('debito_bancario','N/D')}</div></div>
-                    <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{debito.get('obbligazioni','N/D')}</div></div>
-                    <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{debito.get('debito_netto','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Indebitamento Totale</div><div class="kpi-value">{fmt_kpi(report,'indebitamento_totale','struttura_debito')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{fmt_kpi(report,'debito_bancario','struttura_debito')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{fmt_kpi(report,'obbligazioni','struttura_debito')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{fmt_kpi(report,'debito_netto','struttura_debito')}</div></div>
                     <div class="kpi-card"><div class="kpi-label">Leva Finanziaria</div><div class="kpi-value">{debito.get('leva_finanziaria','N/D')}</div></div>
                 </div>
                 """, unsafe_allow_html=True)
-                if debito.get('scadenze_principali', 'N/D') != 'N/D':
-                    st.markdown(f'<div class="section-box"><div class="section-title">Scadenze Principali</div><div class="section-text">{debito.get("scadenze_principali","N/D")}</div></div>', unsafe_allow_html=True)
-                if debito.get('note', 'N/D') != 'N/D':
-                    st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{debito.get("note","N/D")}</div></div>', unsafe_allow_html=True)
+                if debito.get('scadenze_principali', 'N/D') not in ('N/D', '', None):
+                    st.markdown(f'<div class="section-box"><div class="section-title">Scadenze Principali</div><div class="section-text">{debito.get("scadenze_principali")}</div></div>', unsafe_allow_html=True)
+                if debito.get('note', 'N/D') not in ('N/D', '', None):
+                    st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{debito.get("note")}</div></div>', unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="section-box"><div class="section-text">{debito}</div></div>', unsafe_allow_html=True)
 
@@ -1796,18 +1816,18 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                     <div class="kpi-card"><div class="kpi-label">Quota</div><div class="kpi-value">{ownership.get('quota_principale','N/D')}</div></div>
                 </div>
                 """, unsafe_allow_html=True)
-                if ownership.get('altri_azionisti', 'N/D') != 'N/D':
-                    st.markdown(f'<div class="section-box"><div class="section-title">Altri Azionisti</div><div class="section-text">{ownership.get("altri_azionisti","N/D")}</div></div>', unsafe_allow_html=True)
-                if ownership.get('struttura_controllo', 'N/D') != 'N/D':
-                    st.markdown(f'<div class="section-box"><div class="section-title">Struttura di Controllo</div><div class="section-text">{ownership.get("struttura_controllo","N/D")}</div></div>', unsafe_allow_html=True)
-                if ownership.get('note', 'N/D') != 'N/D':
-                    st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{ownership.get("note","N/D")}</div></div>', unsafe_allow_html=True)
+                for lbl, key in [("Altri Azionisti","altri_azionisti"),
+                                  ("Struttura di Controllo","struttura_controllo"),
+                                  ("Note","note")]:
+                    val = ownership.get(key, "N/D")
+                    if val not in ("N/D", "", None):
+                        st.markdown(f'<div class="section-box"><div class="section-title">{lbl}</div><div class="section-text">{val}</div></div>', unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="section-box"><div class="section-text">{ownership}</div></div>', unsafe_allow_html=True)
 
         with st.expander("🔀 Operazioni M&A"):
             operazioni = report.get("operazioni_ma", [])
-            if operazioni and operazioni[0].get("descrizione", "N/D") != "N/D":
+            if operazioni and operazioni[0].get("descrizione","N/D") != "N/D":
                 for op in operazioni:
                     st.markdown(f"""
                     <div class="ma-item">
@@ -1820,6 +1840,30 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
 
         with st.expander("📝 Note Aggiuntive"):
             st.markdown(f'<div class="section-box"><div class="section-text">{report.get("note_aggiuntive","N/D")}</div></div>', unsafe_allow_html=True)
+
+        # Export anche per report singolo
+        st.markdown("---")
+        st.markdown("### 💾 Esporta")
+        _exp_item = [{"nome": report.get("nome_azienda","Report"),
+                      "anno": fin.get("anno_riferimento",""),
+                      "report": report}]
+        col_xl2, col_wd2 = st.columns(2)
+        with col_xl2:
+            try:
+                st.download_button("📊 Scarica Excel", genera_excel(_exp_item),
+                    file_name=f"TaxiReport_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+            except Exception as e:
+                st.error(f"Errore Excel: {e}")
+        with col_wd2:
+            try:
+                st.download_button("📄 Scarica Word", genera_word(_exp_item),
+                    file_name=f"TaxiReport_{datetime.now().strftime('%Y%m%d')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True)
+            except Exception as e:
+                st.error(f"Errore Word: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 
