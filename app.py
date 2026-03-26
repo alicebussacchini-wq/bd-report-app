@@ -1102,7 +1102,7 @@ def _benchmark_cell(valore, bm_range):
 if "pagina" not in st.session_state:
     st.session_state["pagina"] = "genera"
 
-col_nav1, col_nav2, col_nav3 = st.columns(3)
+col_nav1, col_nav2, col_nav3, col_nav4 = st.columns(4)
 with col_nav1:
     if st.button("➕ Genera nuovo report", use_container_width=True):
         st.session_state["pagina"] = "genera"
@@ -1112,6 +1112,9 @@ with col_nav2:
 with col_nav3:
     if st.button("📊 Confronta aziende", use_container_width=True):
         st.session_state["pagina"] = "archivio"  # apre archivio sul tab confronta
+with col_nav4:
+    if st.button("📄 Carica report esistente", use_container_width=True):
+        st.session_state["pagina"] = "carica_esistente"
 
 st.markdown("---")
 
@@ -2097,3 +2100,317 @@ elif st.session_state["pagina"] == "archivio":
                     )
                 except Exception as e:
                     st.error(f"Errore export: {e}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGINA: CARICA REPORT ESISTENTE
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif st.session_state["pagina"] == "carica_esistente":
+
+    st.markdown("### 📄 Carica Report Esistente")
+    st.caption(
+        "Carica un file Word (.docx) di un BD report già compilato. "
+        "Il sistema estrarrà automaticamente tutte le informazioni finanziarie "
+        "e le mostrerà nello stesso formato del report generato manualmente."
+    )
+
+    docx_file = st.file_uploader(
+        "Seleziona un file Word (.docx) di un BD report esistente",
+        type=["docx"],
+        accept_multiple_files=False,
+        key="carica_report_docx",
+        label_visibility="collapsed",
+    )
+
+    if docx_file:
+        # Estrai testo dal .docx con python-docx
+        try:
+            doc_bytes = docx_file.read()
+            doc = Document(io.BytesIO(doc_bytes))
+            paragrafi = [p.text for p in doc.paragraphs if p.text.strip()]
+            # Estrai anche testo dalle tabelle
+            testo_tabelle = []
+            for table in doc.tables:
+                for row in table.rows:
+                    riga_celle = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if riga_celle:
+                        testo_tabelle.append(" | ".join(riga_celle))
+            testo_completo = "\n".join(paragrafi)
+            if testo_tabelle:
+                testo_completo += "\n\n--- TABELLE ---\n" + "\n".join(testo_tabelle)
+        except Exception as e:
+            testo_completo = None
+            st.markdown(f"""
+            <div class="section-box" style="border-left-color: #ef5350;">
+                <div class="section-title" style="color: #ef5350;">
+                    ❌ Errore lettura file
+                </div>
+                <div class="section-text">
+                    Impossibile leggere il file Word: {type(e).__name__}: {e}<br>
+                    Assicurati che il file sia un documento .docx valido e non corrotto.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if testo_completo:
+            with st.expander("📃 Anteprima testo estratto dal documento"):
+                st.text(testo_completo[:3000] + ("..." if len(testo_completo) > 3000 else ""))
+            st.caption(f"Estratti {len(paragrafi)} paragrafi e {len(doc.tables)} tabelle — {len(testo_completo)} caratteri totali")
+
+            if st.button("🔍 Estrai dati dal report", use_container_width=True):
+                client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+                prompt_estrazione = f"""Sei un analista M&A e finance di uno studio legale internazionale.
+Analizza il seguente testo estratto da un BD report aziendale già compilato ed estrai tutte le informazioni finanziarie e aziendali.
+
+--- TESTO DEL REPORT ---
+{testo_completo[:15000]}
+--- FINE TESTO ---
+
+Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo.
+
+REGOLE CRITICHE PER I VALORI NUMERICI:
+- Tutti i valori in "dati_finanziari" e "struttura_debito" devono essere NUMERI PURI (es. 1234567), mai stringhe
+- Indica l'unità di misura usata nel documento nel campo "unita" (es. "migliaia di euro", "milioni di euro", "euro")
+- Converti TUTTI i valori nella stessa unità dichiarata in "unita"
+- I valori negativi (perdite, debito netto) devono avere il segno negativo (es. -5000)
+- Se un valore non è presente nel documento usa null, MAI 0 o "N/D"
+- Non inventare valori: meglio null che un numero sbagliato
+
+{{
+  "nome_azienda": "",
+  "overview": "",
+  "core_business": "",
+  "mercati": "",
+  "dati_finanziari": {{
+    "unita": "migliaia di euro",
+    "ricavi": null,
+    "ebitda": null,
+    "ebit": null,
+    "utile_netto": null,
+    "ammortamenti": null,
+    "totale_attivo": null,
+    "patrimonio_netto": null,
+    "cassa": null,
+    "anno_riferimento": ""
+  }},
+  "struttura_debito": {{
+    "indebitamento_totale": null,
+    "debito_bancario": null,
+    "obbligazioni": null,
+    "debito_netto": null,
+    "leva_finanziaria": null,
+    "scadenze_principali": "",
+    "note": ""
+  }},
+  "ownership": {{
+    "azionista_principale": "",
+    "quota_principale": "",
+    "altri_azionisti": "",
+    "struttura_controllo": "",
+    "note": ""
+  }},
+  "operazioni_ma": [
+    {{"anno": "", "tipo": "", "descrizione": ""}}
+  ],
+  "note_aggiuntive": ""
+}}
+
+Se un testo non è disponibile scrivi N/D."""
+
+                with st.spinner("Claude sta analizzando il documento..."):
+                    for tentativo in range(3):
+                        try:
+                            messaggio = client.messages.create(
+                                model="claude-sonnet-4-20250514",
+                                max_tokens=4000,
+                                messages=[{"role": "user", "content": prompt_estrazione}]
+                            )
+                            risposta = messaggio.content[0].text.strip()
+                            if risposta.startswith("```"):
+                                risposta = risposta.split("```")[1]
+                                if risposta.startswith("json"):
+                                    risposta = risposta[4:]
+                            report = json.loads(risposta.strip())
+
+                            report = normalizza_kpi(report)
+                            kpi_warnings = valida_kpi(report)
+                            report["_validation_warnings"] = kpi_warnings
+
+                            nome_azienda = report.get("nome_azienda", docx_file.name)
+                            st.session_state["report_caricato"] = report
+                            st.session_state["report_caricato_nome"] = nome_azienda
+                            st.session_state["report_caricato_file"] = docx_file.name
+                            st.success("✅ Estrazione completata!")
+                            break
+
+                        except json.JSONDecodeError as e:
+                            if tentativo < 2:
+                                st.warning(f"Tentativo {tentativo+1}: risposta non valida, riprovo...")
+                                time.sleep(5)
+                            else:
+                                st.markdown(f"""
+                                <div class="section-box" style="border-left-color: #ef5350;">
+                                    <div class="section-title" style="color: #ef5350;">
+                                        ❌ Errore di estrazione
+                                    </div>
+                                    <div class="section-text">
+                                        Impossibile interpretare la risposta AI dopo 3 tentativi.<br>
+                                        Dettaglio: {e}
+                                    </div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        except Exception as e:
+                            if tentativo < 2:
+                                st.warning(f"Tentativo {tentativo+1} fallito: {e}, riprovo...")
+                                time.sleep(10)
+                            else:
+                                st.markdown(f"""
+                                <div class="section-box" style="border-left-color: #ef5350;">
+                                    <div class="section-title" style="color: #ef5350;">
+                                        ❌ Errore
+                                    </div>
+                                    <div class="section-text">
+                                        {type(e).__name__}: {e}
+                                    </div>
+                                </div>
+                                """, unsafe_allow_html=True)
+
+    # ── VISUALIZZAZIONE REPORT ESTRATTO DA DOCX ───────────────────────────
+
+    if st.session_state.get("report_caricato"):
+        report = st.session_state["report_caricato"]
+        nome_az = st.session_state.get("report_caricato_nome", "")
+        file_origine = st.session_state.get("report_caricato_file", "")
+        fin = report.get("dati_finanziari", {})
+
+        st.markdown("---")
+        st.markdown(f"## 📋 {nome_az}")
+        if file_origine:
+            st.caption(f"Estratto da: {file_origine}")
+
+        kpi_warnings = report.get("_validation_warnings", [])
+        render_pannello_validazione(kpi_warnings)
+
+        r_val = fin.get("ricavi")
+        e_val = fin.get("ebitda")
+        margine_str = "N/D"
+        if r_val and e_val and report.get("_normalizzato"):
+            try:
+                margine_str = f"{float(e_val)/float(r_val)*100:.1f}%"
+            except:
+                pass
+
+        st.markdown(f"""
+        <div class="kpi-grid">
+            <div class="kpi-card"><div class="kpi-label">Ricavi</div><div class="kpi-value">{fmt_kpi(report,'ricavi')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">EBITDA</div><div class="kpi-value">{fmt_kpi(report,'ebitda')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Margine EBITDA</div><div class="kpi-value">{margine_str}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Utile Netto</div><div class="kpi-value">{fmt_kpi(report,'utile_netto')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Totale Attivo</div><div class="kpi-value">{fmt_kpi(report,'totale_attivo')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Patrimonio Netto</div><div class="kpi-value">{fmt_kpi(report,'patrimonio_netto')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Anno Rif.</div><div class="kpi-value">{fin.get('anno_riferimento','N/D')}</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("🏢 Overview", expanded=True):
+            st.markdown(f'<div class="section-box"><div class="section-title">Overview</div><div class="section-text">{report.get("overview","N/D")}</div></div>', unsafe_allow_html=True)
+
+        with st.expander("⚙️ Core Business & Mercati"):
+            st.markdown(f'<div class="section-box"><div class="section-title">Core Business</div><div class="section-text">{report.get("core_business","N/D")}</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="section-box"><div class="section-title">Mercati</div><div class="section-text">{report.get("mercati","N/D")}</div></div>', unsafe_allow_html=True)
+
+        with st.expander("💰 Struttura del Debito"):
+            debito = report.get("struttura_debito", {})
+            if isinstance(debito, dict):
+                st.markdown(f"""
+                <div class="kpi-grid">
+                    <div class="kpi-card"><div class="kpi-label">Indebitamento Totale</div><div class="kpi-value">{fmt_kpi(report,'indebitamento_totale','struttura_debito')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{fmt_kpi(report,'debito_bancario','struttura_debito')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{fmt_kpi(report,'obbligazioni','struttura_debito')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{fmt_kpi(report,'debito_netto','struttura_debito')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Leva Finanziaria</div><div class="kpi-value">{debito.get('leva_finanziaria','N/D')}</div></div>
+                </div>
+                """, unsafe_allow_html=True)
+                if debito.get('scadenze_principali', 'N/D') not in ('N/D', '', None):
+                    st.markdown(f'<div class="section-box"><div class="section-title">Scadenze Principali</div><div class="section-text">{debito.get("scadenze_principali")}</div></div>', unsafe_allow_html=True)
+                if debito.get('note', 'N/D') not in ('N/D', '', None):
+                    st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{debito.get("note")}</div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="section-box"><div class="section-text">{debito}</div></div>', unsafe_allow_html=True)
+
+        with st.expander("👥 Struttura Ownership"):
+            ownership = report.get("ownership", {})
+            if isinstance(ownership, dict):
+                st.markdown(f"""
+                <div class="kpi-grid">
+                    <div class="kpi-card"><div class="kpi-label">Azionista Principale</div><div class="kpi-value">{ownership.get('azionista_principale','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Quota</div><div class="kpi-value">{ownership.get('quota_principale','N/D')}</div></div>
+                </div>
+                """, unsafe_allow_html=True)
+                for lbl, key in [("Altri Azionisti","altri_azionisti"),
+                                  ("Struttura di Controllo","struttura_controllo"),
+                                  ("Note","note")]:
+                    val = ownership.get(key, "N/D")
+                    if val not in ("N/D", "", None):
+                        st.markdown(f'<div class="section-box"><div class="section-title">{lbl}</div><div class="section-text">{val}</div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="section-box"><div class="section-text">{ownership}</div></div>', unsafe_allow_html=True)
+
+        with st.expander("🔀 Operazioni M&A"):
+            operazioni = report.get("operazioni_ma", [])
+            if operazioni and operazioni[0].get("descrizione", "N/D") != "N/D":
+                for op in operazioni:
+                    st.markdown(f"""
+                    <div class="ma-item">
+                        <span class="ma-anno">{op.get('anno','')}</span>
+                        <div class="ma-tipo">{op.get('tipo','')}</div>
+                        <div class="ma-desc">{op.get('descrizione','')}</div>
+                    </div>""", unsafe_allow_html=True)
+            else:
+                st.write("Nessuna operazione rilevata.")
+
+        with st.expander("📝 Note Aggiuntive"):
+            st.markdown(f'<div class="section-box"><div class="section-text">{report.get("note_aggiuntive","N/D")}</div></div>', unsafe_allow_html=True)
+
+        # ── SALVATAGGIO E EXPORT ───────────────────────────────────────────
+
+        st.markdown("---")
+        st.markdown("### 💾 Salva ed Esporta")
+
+        col_save, col_xl, col_wd = st.columns(3)
+
+        with col_save:
+            if st.button("💾 Salva su Google Sheets", use_container_width=True, key="salva_caricato"):
+                salva_report(nome_az, report, {})
+                st.success("✅ Report salvato nell'archivio Google Sheets!")
+
+        _exp_item = [{"nome": nome_az,
+                      "anno": fin.get("anno_riferimento", ""),
+                      "report": report}]
+
+        with col_xl:
+            try:
+                excel_bytes = genera_excel(_exp_item)
+                st.download_button(
+                    label="📊 Scarica Excel",
+                    data=excel_bytes,
+                    file_name=f"TaxiReport_{nome_az.replace(' ','_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Errore Excel: {e}")
+
+        with col_wd:
+            try:
+                word_bytes = genera_word(_exp_item)
+                st.download_button(
+                    label="📄 Scarica Word",
+                    data=word_bytes,
+                    file_name=f"TaxiReport_{nome_az.replace(' ','_')}_{datetime.now().strftime('%Y%m%d')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Errore Word: {e}")
