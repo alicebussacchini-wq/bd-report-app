@@ -2165,10 +2165,12 @@ elif st.session_state["pagina"] == "carica_esistente":
             paragrafi = [p.text for p in doc.paragraphs if p.text.strip()]
 
             # Estrai tabelle preservando struttura label → valore
+            # Deduplica sia celle merged orizzontali (stessa riga)
+            # sia celle merged verticali (stesse righe consecutive)
             testo_tabelle = []
+            righe_viste_globale = set()
             for table in doc.tables:
                 for row in table.rows:
-                    # Deduplicare celle (merged cells ripetono il contenuto)
                     celle_uniche = []
                     viste = set()
                     for cell in row.cells:
@@ -2177,7 +2179,11 @@ elif st.session_state["pagina"] == "carica_esistente":
                             celle_uniche.append(t)
                             viste.add(t)
                     if celle_uniche:
-                        testo_tabelle.append(" | ".join(celle_uniche))
+                        riga_str = " | ".join(celle_uniche)
+                        # Evita righe identiche da merge verticali
+                        if riga_str not in righe_viste_globale:
+                            righe_viste_globale.add(riga_str)
+                            testo_tabelle.append(riga_str)
 
             testo_completo = "\n".join(paragrafi)
             if testo_tabelle:
@@ -2220,6 +2226,8 @@ CRITICAL RULES:
 4. For each section you find, create an entry in the "sezioni" array with the exact section title and ALL its fields.
 5. Each field has a "label" (the field name as it appears) and a "valore" (the full content, verbatim).
 6. If a field contains multiple paragraphs or bullet points, include them all in "valore" separated by newlines.
+7. NEVER repeat the same content in multiple fields. Each piece of information must appear EXACTLY ONCE. If the same text appears under multiple labels in the source (due to merged cells), include it only in the most specific/relevant field.
+8. If a cell contains multiple sub-sections (e.g. "Rumored Transactions" and "Critical Issues / Outlook" in the same cell), split them into SEPARATE fields with their own label and value.
 
 Respond ONLY with valid JSON, no backticks, no additional text.
 
