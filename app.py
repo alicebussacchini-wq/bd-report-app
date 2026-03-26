@@ -1989,19 +1989,23 @@ elif st.session_state["pagina"] == "archivio":
         if len(reports_tutti) < 2:
             st.info("Servono almeno 2 report in archivio per confrontare.")
         else:
-            # Selezione aziende
-            opzioni = [
-                f"{x['report'].get('nome_azienda', x.get('nome','—'))} "
-                f"({x['report'].get('dati_finanziari',{}).get('anno_riferimento','—')})"
-                for x in reports_tutti
-            ]
+            # Etichetta per ogni report (funziona con entrambi gli schemi)
+            def _label_report(x):
+                r = x["report"]
+                nome = r.get("nome_azienda", x.get("nome", "—"))
+                if "sezioni" in r:
+                    return f"{nome} (report caricato)"
+                anno = r.get("dati_finanziari", {}).get("anno_riferimento", "—")
+                return f"{nome} ({anno})"
+
+            opzioni = [_label_report(x) for x in reports_tutti]
             selezionati = st.multiselect(
-                "Seleziona 2-5 aziende/anni da confrontare",
+                "Seleziona 2-5 aziende da confrontare",
                 options=opzioni,
                 max_selections=5,
             )
 
-            # Benchmark settore opzionale
+            # Benchmark settore (solo per report classici)
             settore_sel = st.selectbox(
                 "Benchmark di settore (opzionale)",
                 options=["— Nessun benchmark —"] + list(BENCHMARK_SETTORE.keys()),
@@ -2011,129 +2015,192 @@ elif st.session_state["pagina"] == "archivio":
             if len(selezionati) < 2:
                 st.caption("Seleziona almeno 2 aziende per visualizzare il confronto.")
             else:
-                # Recupera i report selezionati
                 idx_sel = [opzioni.index(s) for s in selezionati]
                 sel_reports = [reports_tutti[i] for i in idx_sel]
+
+                # ── Funzione per appiattire qualsiasi report in sezioni unificate ──
+
+                def _flatten_report(report):
+                    """
+                    Converte qualsiasi report (classico o flex) in una lista di
+                    (titolo_sezione, [(label, valore), ...]) per il confronto.
+                    """
+                    sezioni = []
+
+                    if "sezioni" in report:
+                        # Schema flessibile (report caricato da docx)
+                        for sez in report["sezioni"]:
+                            titolo = sez.get("titolo_sezione", "")
+                            campi = [(c["label"], str(c.get("valore", "")))
+                                     for c in sez.get("campi", [])]
+                            if campi:
+                                sezioni.append((titolo, campi))
+                    else:
+                        # Schema classico (report da bilancio)
+                        fin = report.get("dati_finanziari", {})
+                        deb = report.get("struttura_debito", {})
+                        own = report.get("ownership", {})
+
+                        # General Information
+                        info_campi = []
+                        if report.get("nome_azienda"):
+                            info_campi.append(("Company name", report["nome_azienda"]))
+                        if report.get("overview") and report["overview"] != "N/D":
+                            info_campi.append(("Overview", report["overview"]))
+                        if report.get("core_business") and report["core_business"] != "N/D":
+                            info_campi.append(("Core Business", report["core_business"]))
+                        if report.get("mercati") and report["mercati"] != "N/D":
+                            info_campi.append(("Markets", report["mercati"]))
+                        if info_campi:
+                            sezioni.append(("General Information", info_campi))
+
+                        # Financial Data
+                        fin_campi = []
+                        for lbl, key in [
+                            ("Ricavi / Revenue", "ricavi"), ("EBITDA", "ebitda"),
+                            ("EBIT", "ebit"), ("Utile Netto / Net Result", "utile_netto"),
+                            ("Ammortamenti", "ammortamenti"),
+                            ("Totale Attivo / Total Assets", "totale_attivo"),
+                            ("Patrimonio Netto / Shareholders' Equity", "patrimonio_netto"),
+                            ("Cassa / Cash", "cassa"),
+                        ]:
+                            v = fin.get(key)
+                            if v is not None:
+                                fin_campi.append((lbl, _fmt(v) if report.get("_normalizzato") else str(v)))
+                        if fin.get("anno_riferimento"):
+                            fin_campi.append(("Anno riferimento", fin["anno_riferimento"]))
+                        if fin_campi:
+                            sezioni.append(("Financial Data", fin_campi))
+
+                        # Debt Structure
+                        deb_campi = []
+                        for lbl, key in [
+                            ("Indebitamento Totale", "indebitamento_totale"),
+                            ("Debito Bancario", "debito_bancario"),
+                            ("Obbligazioni", "obbligazioni"),
+                            ("Debito Netto / Net Financial Position", "debito_netto"),
+                            ("Leva Finanziaria", "leva_finanziaria"),
+                        ]:
+                            v = deb.get(key)
+                            if v is not None:
+                                if key == "leva_finanziaria":
+                                    deb_campi.append((lbl, f"{v}x"))
+                                else:
+                                    deb_campi.append((lbl, _fmt(v) if report.get("_normalizzato") else str(v)))
+                        if deb.get("scadenze_principali") and deb["scadenze_principali"] != "N/D":
+                            deb_campi.append(("Scadenze principali", deb["scadenze_principali"]))
+                        if deb.get("note") and deb["note"] != "N/D":
+                            deb_campi.append(("Note debito", deb["note"]))
+                        if deb_campi:
+                            sezioni.append(("Debt Structure", deb_campi))
+
+                        # Governance / Ownership
+                        own_campi = []
+                        if isinstance(own, dict):
+                            for lbl, key in [
+                                ("Azionista Principale / Main Shareholder", "azionista_principale"),
+                                ("Quota", "quota_principale"),
+                                ("Altri Azionisti", "altri_azionisti"),
+                                ("Struttura Controllo", "struttura_controllo"),
+                            ]:
+                                v = own.get(key)
+                                if v and v != "N/D":
+                                    own_campi.append((lbl, str(v)))
+                        if own_campi:
+                            sezioni.append(("Governance", own_campi))
+
+                        # M&A / Deals
+                        ops = report.get("operazioni_ma", [])
+                        ops_campi = []
+                        for op in ops:
+                            desc = op.get("descrizione", "N/D")
+                            if desc and desc != "N/D":
+                                anno_op = op.get("anno", "")
+                                tipo_op = op.get("tipo", "")
+                                label = f"{anno_op} — {tipo_op}" if anno_op else (tipo_op or "Transaction")
+                                ops_campi.append((label, desc))
+                        if ops_campi:
+                            sezioni.append(("Deals", ops_campi))
+
+                        # Note aggiuntive
+                        if report.get("note_aggiuntive") and report["note_aggiuntive"] != "N/D":
+                            sezioni.append(("Additional Notes", [("Note", report["note_aggiuntive"])]))
+
+                    return sezioni
+
+                # ── Costruzione indice unificato di tutte le sezioni e campi ──
+
+                # Per ogni report, appiattisci
+                flat_reports = [_flatten_report(item["report"]) for item in sel_reports]
+
+                # Raccogli tutte le sezioni e i loro campi nell'ordine in cui appaiono
+                sezioni_ordinate = []  # lista di titoli sezione in ordine
+                campi_per_sezione = {}  # titolo → lista ordinata di label unici
+                for flat in flat_reports:
+                    for titolo, campi in flat:
+                        if titolo not in campi_per_sezione:
+                            sezioni_ordinate.append(titolo)
+                            campi_per_sezione[titolo] = []
+                        for lbl, _ in campi:
+                            if lbl not in campi_per_sezione[titolo]:
+                                campi_per_sezione[titolo].append(lbl)
+
+                # Per lookup veloce: report_idx → {(sezione, label): valore}
+                lookup = []
+                for flat in flat_reports:
+                    d = {}
+                    for titolo, campi in flat:
+                        for lbl, val in campi:
+                            d[(titolo, lbl)] = val
+                    lookup.append(d)
+
+                # ── Rendering confronto ──────────────────────────────────────
 
                 st.markdown("---")
                 st.markdown("#### Tabella comparativa")
 
-                # Righe KPI da confrontare
-                kpi_conf = [
-                    ("Ricavi",            "dati_finanziari",  "ricavi",             None),
-                    ("EBITDA",            "dati_finanziari",  "ebitda",             None),
-                    ("Margine EBITDA",    None,               "_margine_ebitda",    "margine_ebitda"),
-                    ("EBIT",              "dati_finanziari",  "ebit",               None),
-                    ("Utile Netto",       "dati_finanziari",  "utile_netto",        None),
-                    ("Margine Utile",     None,               "_margine_utile",     "margine_utile"),
-                    ("Totale Attivo",     "dati_finanziari",  "totale_attivo",      None),
-                    ("Patrimonio Netto",  "dati_finanziari",  "patrimonio_netto",   None),
-                    ("Debito Netto",      "struttura_debito", "debito_netto",       None),
-                    ("Leva (x)",          "struttura_debito", "leva_finanziaria",   "leva"),
-                ]
+                for titolo_sez in sezioni_ordinate:
+                    labels = campi_per_sezione[titolo_sez]
+                    if not labels:
+                        continue
 
-                # Intestazione tabella
-                header_cols = st.columns([2] + [2] * len(sel_reports) + ([1] if bm else []))
-                header_cols[0].markdown("**KPI**")
-                for j, s in enumerate(selezionati):
-                    header_cols[j+1].markdown(f"**{s}**")
-                if bm:
-                    header_cols[-1].markdown("**Benchmark**")
-
-                st.markdown('<hr style="border-color:#444;margin:4px 0 8px 0;">', unsafe_allow_html=True)
-
-                for label, sezione, campo, bm_key in kpi_conf:
-                    row_cols = st.columns([2] + [2] * len(sel_reports) + ([1] if bm else []))
-                    row_cols[0].markdown(f"<span style='color:#999;font-size:13px;'>{label}</span>",
-                                         unsafe_allow_html=True)
-
-                    vals = []
-                    for j, item in enumerate(sel_reports):
-                        r = item["report"]
-                        fin_c = r.get("dati_finanziari", {})
-                        deb_c = r.get("struttura_debito", {})
-                        val = None
-
-                        if campo == "_margine_ebitda":
-                            ric = fin_c.get("ricavi")
-                            ebt = fin_c.get("ebitda")
-                            if ric and ebt:
-                                try: val = float(ebt) / float(ric)
-                                except: pass
-                            display = f"{val*100:.1f}%" if val is not None else "N/D"
-                        elif campo == "_margine_utile":
-                            ric = fin_c.get("ricavi")
-                            utn = fin_c.get("utile_netto")
-                            if ric and utn:
-                                try: val = float(utn) / float(ric)
-                                except: pass
-                            display = f"{val*100:.1f}%" if val is not None else "N/D"
-                        elif sezione == "dati_finanziari":
-                            raw = fin_c.get(campo)
-                            if raw is not None:
-                                try: val = float(raw)
-                                except: pass
-                            display = _fmt(val)
-                        elif sezione == "struttura_debito":
-                            raw = deb_c.get(campo)
-                            if raw is not None:
-                                try: val = float(raw)
-                                except: pass
-                            display = f"{val:.1f}x" if (campo == "leva_finanziaria" and val) else _fmt(val)
-                        else:
-                            display = "N/D"
-
-                        vals.append(val)
-                        row_cols[j+1].markdown(
-                            f"<span style='font-size:13px;font-weight:600;"
-                            f"color:#c8e04a;'>{display}</span>",
-                            unsafe_allow_html=True
-                        )
-
-                    # Colonna benchmark
-                    if bm and bm_key and bm_key in bm:
-                        # Usa il valore medio dei selezionati per confronto
-                        valori_validi = [v for v in vals if v is not None]
-                        val_medio = sum(valori_validi)/len(valori_validi) if valori_validi else None
-                        testo_bm, colore_bm = _benchmark_cell(val_medio, bm.get(bm_key))
-                        lo, hi = bm[bm_key]
-                        range_str = (f"{lo*100:.0f}–{hi*100:.0f}%"
-                                     if "margine" in bm_key
-                                     else f"{lo:.1f}–{hi:.1f}x")
-                        row_cols[-1].markdown(
-                            f"<span style='font-size:11px;color:{colore_bm};'>"
-                            f"{testo_bm}<br>"
-                            f"<span style='color:#666;'>Range: {range_str}</span>"
-                            f"</span>",
-                            unsafe_allow_html=True
-                        )
-                    elif bm:
-                        row_cols[-1].markdown(
-                            "<span style='font-size:11px;color:#666;'>—</span>",
-                            unsafe_allow_html=True
-                        )
-
-                    st.markdown('<hr style="border-color:#2a2a2a;margin:2px 0;">', unsafe_allow_html=True)
-
-                # Export comparazione
-                st.markdown("---")
-                try:
-                    reports_export = [
-                        {"nome": x["report"].get("nome_azienda", x.get("nome","—")),
-                         "anno": x["report"].get("dati_finanziari",{}).get("anno_riferimento","—"),
-                         "report": x["report"]}
-                        for x in sel_reports
-                    ]
-                    excel_bytes = genera_excel(reports_export)
-                    st.download_button(
-                        label="📊 Scarica confronto Excel",
-                        data=excel_bytes,
-                        file_name=f"Confronto_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+                    st.markdown(
+                        f'<div style="background:#2a2a2a;border-left:4px solid #c8e04a;'
+                        f'padding:8px 14px;margin:16px 0 8px 0;border-radius:6px;">'
+                        f'<span style="color:#c8e04a;font-weight:700;">{titolo_sez}</span></div>',
+                        unsafe_allow_html=True
                     )
-                except Exception as e:
-                    st.error(f"Errore export: {e}")
+
+                    # Intestazione colonne
+                    header_cols = st.columns([3] + [2] * len(sel_reports))
+                    header_cols[0].markdown(
+                        "<span style='color:#999;font-size:11px;text-transform:uppercase;'>Campo</span>",
+                        unsafe_allow_html=True
+                    )
+                    for j, s in enumerate(selezionati):
+                        header_cols[j+1].markdown(
+                            f"<span style='color:#c8e04a;font-size:11px;font-weight:600;'>{s}</span>",
+                            unsafe_allow_html=True
+                        )
+                    st.markdown('<hr style="border-color:#444;margin:2px 0 6px 0;">', unsafe_allow_html=True)
+
+                    for lbl in labels:
+                        row_cols = st.columns([3] + [2] * len(sel_reports))
+                        row_cols[0].markdown(
+                            f"<span style='color:#999;font-size:13px;'>{lbl}</span>",
+                            unsafe_allow_html=True
+                        )
+                        for j in range(len(sel_reports)):
+                            val = lookup[j].get((titolo_sez, lbl), "—")
+                            # Tronca valori molto lunghi nel confronto
+                            val_display = val if len(val) <= 120 else val[:117] + "..."
+                            row_cols[j+1].markdown(
+                                f"<span style='font-size:12px;color:#ddd;'>{val_display}</span>",
+                                unsafe_allow_html=True
+                            )
+                        st.markdown('<hr style="border-color:#2a2a2a;margin:1px 0;">', unsafe_allow_html=True)
+
+                st.markdown("---")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGINA: CARICA REPORT ESISTENTE
