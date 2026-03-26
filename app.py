@@ -1906,37 +1906,71 @@ elif st.session_state["pagina"] == "archivio":
                               f'⚠️ {warnings_count} warning</span>'
                               if warnings_count else "")
 
-                st.markdown(f"""
-                <div class="archivio-card">
-                    <div class="archivio-nome">{nome_az}{warn_badge}</div>
-                    <div class="archivio-data">📅 {item["data"]} &nbsp;|&nbsp; Anno bilancio: {anno_az}</div>
-                    <div class="archivio-kpi">
-                        <div class="archivio-kpi-item">
-                            <span class="archivio-kpi-label">Ricavi</span>
-                            <span class="archivio-kpi-val">{_fmt(fin.get("ricavi"))}</span>
-                        </div>
-                        <div class="archivio-kpi-item">
-                            <span class="archivio-kpi-label">EBITDA</span>
-                            <span class="archivio-kpi-val">{_fmt(fin.get("ebitda"))}</span>
-                        </div>
-                        <div class="archivio-kpi-item">
-                            <span class="archivio-kpi-label">Utile Netto</span>
-                            <span class="archivio-kpi-val">{_fmt(fin.get("utile_netto"))}</span>
-                        </div>
-                        <div class="archivio-kpi-item">
-                            <span class="archivio-kpi-label">PN</span>
-                            <span class="archivio-kpi-val">{_fmt(fin.get("patrimonio_netto"))}</span>
+                # Report con schema flessibile (caricati da docx)
+                is_flex = "sezioni" in r
+
+                if is_flex:
+                    # Anteprima: mostra primi campi corti dalle prime sezioni
+                    kpi_items_html = ""
+                    for sez in r.get("sezioni", [])[:3]:
+                        for campo in sez.get("campi", [])[:2]:
+                            lbl = campo.get("label", "")
+                            val = str(campo.get("valore", ""))[:40]
+                            if len(val) <= 40:
+                                kpi_items_html += f"""
+                                <div class="archivio-kpi-item">
+                                    <span class="archivio-kpi-label">{lbl}</span>
+                                    <span class="archivio-kpi-val">{val}</span>
+                                </div>"""
+                    num_sezioni = len(r.get("sezioni", []))
+                    st.markdown(f"""
+                    <div class="archivio-card">
+                        <div class="archivio-nome">{nome_az}{warn_badge}</div>
+                        <div class="archivio-data">📅 {item["data"]} &nbsp;|&nbsp; 📄 Report caricato ({num_sezioni} sezioni)</div>
+                        <div class="archivio-kpi">{kpi_items_html}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="archivio-card">
+                        <div class="archivio-nome">{nome_az}{warn_badge}</div>
+                        <div class="archivio-data">📅 {item["data"]} &nbsp;|&nbsp; Anno bilancio: {anno_az}</div>
+                        <div class="archivio-kpi">
+                            <div class="archivio-kpi-item">
+                                <span class="archivio-kpi-label">Ricavi</span>
+                                <span class="archivio-kpi-val">{_fmt(fin.get("ricavi"))}</span>
+                            </div>
+                            <div class="archivio-kpi-item">
+                                <span class="archivio-kpi-label">EBITDA</span>
+                                <span class="archivio-kpi-val">{_fmt(fin.get("ebitda"))}</span>
+                            </div>
+                            <div class="archivio-kpi-item">
+                                <span class="archivio-kpi-label">Utile Netto</span>
+                                <span class="archivio-kpi-val">{_fmt(fin.get("utile_netto"))}</span>
+                            </div>
+                            <div class="archivio-kpi-item">
+                                <span class="archivio-kpi-label">PN</span>
+                                <span class="archivio-kpi-val">{_fmt(fin.get("patrimonio_netto"))}</span>
+                            </div>
                         </div>
                     </div>
-                </div>
-                """, unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
 
                 col_a, col_b, col_c = st.columns([1, 1, 4])
                 with col_a:
                     if st.button("📖 Apri", key=f"apri_{item['riga']}"):
-                        st.session_state["report"] = r
-                        st.session_state.pop("reports_generati", None)
-                        st.session_state["pagina"] = "genera"
+                        if is_flex:
+                            # Report con schema flessibile → apri in carica_esistente
+                            st.session_state["report_caricato"] = r
+                            st.session_state["report_caricato_nome"] = nome_az
+                            st.session_state["report_caricato_file"] = ""
+                            st.session_state.pop("reports_generati", None)
+                            st.session_state["pagina"] = "carica_esistente"
+                        else:
+                            # Report con schema classico → apri in genera
+                            st.session_state["report"] = r
+                            st.session_state.pop("reports_generati", None)
+                            st.session_state["pagina"] = "genera"
                         st.rerun()
                 with col_b:
                     if st.button("🗑️ Elimina", key=f"elimina_{item['riga']}"):
