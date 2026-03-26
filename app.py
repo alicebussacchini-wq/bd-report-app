@@ -2165,25 +2165,31 @@ elif st.session_state["pagina"] == "carica_esistente":
             paragrafi = [p.text for p in doc.paragraphs if p.text.strip()]
 
             # Estrai tabelle preservando struttura label → valore
-            # Deduplica sia celle merged orizzontali (stessa riga)
-            # sia celle merged verticali (stesse righe consecutive)
+            # Gestisce merged cells orizzontali e verticali:
+            # - orizzontali: stessa cella ripetuta nella stessa riga → deduplica
+            # - verticali: stessa cella ripetuta su righe consecutive → prendi solo
+            #   le celle nuove dalla riga successiva
             testo_tabelle = []
-            righe_viste_globale = set()
             for table in doc.tables:
+                contenuti_visti = set()  # traccia tutti i contenuti già emessi
                 for row in table.rows:
+                    # Deduplica celle orizzontali (merged)
                     celle_uniche = []
-                    viste = set()
+                    viste_riga = set()
                     for cell in row.cells:
                         t = cell.text.strip()
-                        if t and t not in viste:
+                        if t and t not in viste_riga:
                             celle_uniche.append(t)
-                            viste.add(t)
-                    if celle_uniche:
-                        riga_str = " | ".join(celle_uniche)
-                        # Evita righe identiche da merge verticali
-                        if riga_str not in righe_viste_globale:
-                            righe_viste_globale.add(riga_str)
-                            testo_tabelle.append(riga_str)
+                            viste_riga.add(t)
+                    # Dalle celle uniche, prendi solo quelle mai viste prima
+                    # (gestisce merged cells verticali)
+                    celle_nuove = [c for c in celle_uniche if c not in contenuti_visti]
+                    # Registra tutto come visto
+                    for c in celle_uniche:
+                        contenuti_visti.add(c)
+                    # Emetti solo se ci sono celle nuove
+                    if celle_nuove:
+                        testo_tabelle.append(" | ".join(celle_nuove))
 
             testo_completo = "\n".join(paragrafi)
             if testo_tabelle:
@@ -2262,7 +2268,7 @@ If you find sections with different names, use those names exactly."""
                         try:
                             messaggio = client.messages.create(
                                 model="claude-sonnet-4-20250514",
-                                max_tokens=8000,
+                                max_tokens=16000,
                                 messages=[{"role": "user", "content": prompt_estrazione}]
                             )
                             risposta = messaggio.content[0].text.strip()
