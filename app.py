@@ -2334,7 +2334,7 @@ If you find sections with different names, use those names exactly."""
                     for tentativo in range(3):
                         try:
                             messaggio = client.messages.create(
-                                model="claude-sonnet-4-20250514",
+                                model="claude-sonnet-4-6",
                                 max_tokens=16000,
                                 messages=[{"role": "user", "content": prompt_estrazione}]
                             )
