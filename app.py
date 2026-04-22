@@ -302,6 +302,67 @@ def valida_kpi(report: dict) -> list:
                 "messaggio": f"Leva {leva:.1f}x molto elevata — possibile errore di estrazione"
             })
 
+    # ── Check struttura debito (categorizzazione corretta) ──────────────────
+
+    deb_banc = get(debito, "debito_bancario")
+    obblig   = get(debito, "obbligazioni")
+
+    # Indebitamento totale deve essere >= debito bancario + obbligazioni
+    # (perché la voce D del passivo INCLUDE D.1, D.2 e D.4)
+    if deb_tot is not None and deb_banc is not None:
+        somma_finanziaria = deb_banc + (obblig or 0)
+        # Tolleranza 1% per arrotondamenti
+        if somma_finanziaria > 0 and deb_tot < somma_finanziaria * 0.99:
+            warnings.append({
+                "livello": "error",
+                "campo": "Indebitamento Totale",
+                "messaggio": (
+                    f"Indebitamento totale ({_fmt(deb_tot)}) < debito bancario ({_fmt(deb_banc)}) "
+                    f"+ obbligazioni ({_fmt(obblig or 0)}) = {_fmt(somma_finanziaria)}. "
+                    f"Probabilmente è stato letto solo il debito finanziario invece del Totale Debiti "
+                    f"(voce D del passivo)."
+                )
+            })
+
+    # Indebitamento totale sospettosamente uguale al debito bancario (lettura sbagliata)
+    if deb_tot is not None and deb_banc is not None and deb_banc > 0:
+        if abs(deb_tot - deb_banc) / deb_banc < 0.01:
+            warnings.append({
+                "livello": "warning",
+                "campo": "Indebitamento Totale",
+                "messaggio": (
+                    f"Indebitamento totale ({_fmt(deb_tot)}) coincide con debito bancario. "
+                    f"Verifica: il primo dovrebbe essere il Totale Debiti del passivo (voce D), "
+                    f"che include anche fornitori, tributari, previdenziali, ecc."
+                )
+            })
+
+    # Indebitamento totale > Totale Attivo (impossibile)
+    if deb_tot is not None and attivo is not None and attivo > 0:
+        if deb_tot > attivo:
+            warnings.append({
+                "livello": "error",
+                "campo": "Indebitamento Totale",
+                "messaggio": f"Indebitamento totale ({_fmt(deb_tot)}) > Totale attivo ({_fmt(attivo)}) — impossibile"
+            })
+
+    # Patrimonio netto + Indebitamento totale dovrebbero essere ≈ Totale Attivo
+    # (PN + Debiti + Fondi + TFR + Ratei = Totale Passivo = Totale Attivo)
+    # Se PN + Debiti > Totale Attivo, c'è un errore
+    if (pn is not None and deb_tot is not None and attivo is not None
+            and attivo > 0):
+        somma = pn + deb_tot
+        if somma > attivo * 1.05:  # tolleranza 5%
+            warnings.append({
+                "livello": "warning",
+                "campo": "Quadratura Stato Patrimoniale",
+                "messaggio": (
+                    f"Patrimonio Netto ({_fmt(pn)}) + Indebitamento ({_fmt(deb_tot)}) = "
+                    f"{_fmt(somma)} > Totale Attivo ({_fmt(attivo)}). "
+                    f"Verifica le voci del passivo."
+                )
+            })
+
     return warnings
 
 
@@ -1384,6 +1445,51 @@ REGOLE CRITICHE PER I VALORI NUMERICI:
 - I valori negativi (perdite, debito netto) devono avere il segno negativo (es. -5000)
 - Se un valore non è presente nel documento usa null, MAI 0 o "N/D"
 - Non inventare valori: meglio null che un numero sbagliato
+- Se il bilancio è CONSOLIDATO usa i dati consolidati; se è solo separato usa quelli civilistici
+
+ISTRUZIONI PRECISE PER OGNI CAMPO FINANZIARIO (bilancio CEE italiano):
+
+CONTO ECONOMICO:
+- "ricavi": riga "Ricavi delle vendite e delle prestazioni" (voce A.1 del Conto Economico).
+  NON usare "Valore della produzione" (voce A totale): quella include variazioni rimanenze e altri ricavi.
+- "ebit": "Risultato operativo" o "Differenza tra valore e costi della produzione" (A - B).
+  Se il bilancio espone "EBIT" usa quello.
+- "ammortamenti": voce B.10 "Ammortamenti e svalutazioni" (somma di B.10.a + B.10.b + B.10.c + B.10.d).
+- "ebitda": se esposto direttamente nel bilancio o nella relazione sulla gestione, usa quello.
+  Altrimenti calcolalo come EBIT + Ammortamenti (B.10).
+  L'EBITDA è quasi sempre POSITIVO per società operative; se ti viene negativo verifica.
+- "utile_netto": "Utile (perdita) dell'esercizio" — ULTIMA riga del Conto Economico (dopo le imposte).
+  Se è una perdita usa il segno negativo.
+
+STATO PATRIMONIALE — ATTIVO:
+- "totale_attivo": "Totale attivo" — riga finale dell'attivo (dopo A+B+C+D).
+- "cassa": voce C.IV dell'attivo circolante "Disponibilità liquide" (somma depositi bancari + denaro + assegni).
+
+STATO PATRIMONIALE — PASSIVO:
+- "patrimonio_netto": "Totale patrimonio netto" — voce A del Passivo (capitale + riserve + utile esercizio).
+
+STRUTTURA DEBITO — DISTINGUERE BENE QUESTI 4 CAMPI:
+- "indebitamento_totale": "TOTALE DEBITI" — voce D del Passivo (riga riassuntiva di TUTTI i debiti).
+  Include: obbligazioni + verso banche + verso altri finanziatori + verso fornitori + tributari + previdenziali + verso dipendenti + altri.
+  È un valore GRANDE (di solito comparabile a metà del totale attivo).
+  ATTENZIONE: NON è "totale debiti finanziari" (= bancario + obbligazioni). NON confondere con il debito bancario.
+  Se il bilancio espone solo "Totale debiti finanziari" e non il "Totale debiti" del passivo, scrivi quello e nel campo "note" segnala "indebitamento_totale = solo debiti finanziari, non totale debiti del passivo".
+- "debito_bancario": voce D.4 del Passivo "Debiti verso banche" (somma esigibili entro+oltre l'esercizio).
+  Tipicamente molto più piccolo di "indebitamento_totale".
+- "obbligazioni": somma di voci D.1 "Obbligazioni" + D.2 "Obbligazioni convertibili" del Passivo.
+  Se non emette obbligazioni metti 0.
+- "debito_netto": "Posizione Finanziaria Netta" (PFN) o "Indebitamento Finanziario Netto".
+  Cercala nella relazione sulla gestione o nelle note. Formula: debiti finanziari (obbligazioni + verso banche + verso altri finanziatori) MENO disponibilità liquide e attività finanziarie a breve.
+  Può essere POSITIVO (più debito che cassa) o NEGATIVO (più cassa che debito = posizione finanziaria netta attiva).
+- "leva_finanziaria": Debito Netto / EBITDA. Se non esposto, calcolalo. Numero puro (es. 2.5 significa 2.5x).
+  Se PFN è negativa (cassa netta), la leva è negativa.
+
+CHECK CONTABILI OBBLIGATORI prima di rispondere:
+1. indebitamento_totale >= debito_bancario + obbligazioni (sempre, perché D contiene D.1+D.2+D.4)
+   Se non torna, hai sbagliato a leggere indebitamento_totale: cerca la voce D del Passivo, non il subtotale finanziario.
+2. patrimonio_netto < totale_attivo (sempre).
+3. ebitda ≈ ebit + ammortamenti (tolleranza 5%).
+4. cassa < totale_attivo.
 
 {{
   "nome_azienda": "{nome}",
