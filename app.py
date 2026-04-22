@@ -1438,58 +1438,219 @@ Produci un report strutturato in JSON, con tutti i testi {lingua_prompt}.
 
 Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo.
 
-REGOLE CRITICHE PER I VALORI NUMERICI:
-- Tutti i valori in "dati_finanziari" e "struttura_debito" devono essere NUMERI PURI (es. 1234567), mai stringhe
-- Indica l'unità di misura usata nel bilancio nel campo "unita" (es. "migliaia di euro", "milioni di euro", "euro")
-- Converti TUTTI i valori nella stessa unità dichiarata in "unita"
-- I valori negativi (perdite, debito netto) devono avere il segno negativo (es. -5000)
-- Se un valore non è presente nel documento usa null, MAI 0 o "N/D"
-- Non inventare valori: meglio null che un numero sbagliato
-- Se il bilancio è CONSOLIDATO usa i dati consolidati; se è solo separato usa quelli civilistici
+═══════════════════════════════════════════════════════════════════
+STEP 0 — DETERMINA IL TIPO DI BILANCIO (CRITICO)
+═══════════════════════════════════════════════════════════════════
 
-ISTRUZIONI PRECISE PER OGNI CAMPO FINANZIARIO (bilancio CEE italiano):
+Prima di estrarre qualsiasi dato, identifica il TIPO di bilancio analizzando
+il documento. Popola il campo "tipo_bilancio" nelle note con UNO di questi valori:
 
-CONTO ECONOMICO:
-- "ricavi": riga "Ricavi delle vendite e delle prestazioni" (voce A.1 del Conto Economico).
-  NON usare "Valore della produzione" (voce A totale): quella include variazioni rimanenze e altri ricavi.
-- "ebit": "Risultato operativo" o "Differenza tra valore e costi della produzione" (A - B).
-  Se il bilancio espone "EBIT" usa quello.
-- "ammortamenti": voce B.10 "Ammortamenti e svalutazioni" (somma di B.10.a + B.10.b + B.10.c + B.10.d).
-- "ebitda": se esposto direttamente nel bilancio o nella relazione sulla gestione, usa quello.
-  Altrimenti calcolalo come EBIT + Ammortamenti (B.10).
-  L'EBITDA è quasi sempre POSITIVO per società operative; se ti viene negativo verifica.
-- "utile_netto": "Utile (perdita) dell'esercizio" — ULTIMA riga del Conto Economico (dopo le imposte).
-  Se è una perdita usa il segno negativo.
+(A) "consolidato_ifrs" — Bilancio consolidato redatto secondo IAS/IFRS.
+    INDICATORI: presenza di "bilancio consolidato", "area di consolidamento",
+    "patrimonio netto di terzi", "interessenze di minoranza", riferimenti a
+    "IAS", "IFRS", voci come "Attività per diritti d'uso" / "Passività per
+    leasing" (IFRS 16), schema ESMA 32-382-1138 per la PFN, conto economico
+    complessivo, presenza di "Avviamento" con impairment test.
 
-STATO PATRIMONIALE — ATTIVO:
-- "totale_attivo": "Totale attivo" — riga finale dell'attivo (dopo A+B+C+D).
-- "cassa": voce C.IV dell'attivo circolante "Disponibilità liquide" (somma depositi bancari + denaro + assegni).
+(B) "esercizio_ifrs" — Bilancio d'esercizio (separato) di società quotata
+    che applica IFRS. INDICATORI: titolo "Bilancio d'esercizio" o "Bilancio
+    separato" + riferimenti a IAS/IFRS + presenza di passività per leasing
+    IFRS 16. Tipicamente capogruppo di gruppi quotati.
 
-STATO PATRIMONIALE — PASSIVO:
-- "patrimonio_netto": "Totale patrimonio netto" — voce A del Passivo (capitale + riserve + utile esercizio).
+(C) "esercizio_civilistico" — Bilancio d'esercizio secondo Codice Civile (OIC).
+    INDICATORI: stato patrimoniale con macroclassi A/B/C/D lato attivo e
+    A/B/C/D/E lato passivo (art. 2424 C.C.), conto economico ex art. 2425
+    C.C. con voci A, B, 20, 21, riferimenti a "OIC" / "principi contabili
+    nazionali", voce "D) Debiti" con sottovoci D.1 Obbligazioni, D.4 Debiti
+    verso banche, ecc. ASSENZA di "Passività per leasing" esposte separatamente.
 
-STRUTTURA DEBITO — DISTINGUERE BENE QUESTI 4 CAMPI:
-- "indebitamento_totale": "TOTALE DEBITI" — voce D del Passivo (riga riassuntiva di TUTTI i debiti).
-  Include: obbligazioni + verso banche + verso altri finanziatori + verso fornitori + tributari + previdenziali + verso dipendenti + altri.
-  È un valore GRANDE (di solito comparabile a metà del totale attivo).
-  ATTENZIONE: NON è "totale debiti finanziari" (= bancario + obbligazioni). NON confondere con il debito bancario.
-  Se il bilancio espone solo "Totale debiti finanziari" e non il "Totale debiti" del passivo, scrivi quello e nel campo "note" segnala "indebitamento_totale = solo debiti finanziari, non totale debiti del passivo".
-- "debito_bancario": voce D.4 del Passivo "Debiti verso banche" (somma esigibili entro+oltre l'esercizio).
-  Tipicamente molto più piccolo di "indebitamento_totale".
-- "obbligazioni": somma di voci D.1 "Obbligazioni" + D.2 "Obbligazioni convertibili" del Passivo.
-  Se non emette obbligazioni metti 0.
-- "debito_netto": "Posizione Finanziaria Netta" (PFN) o "Indebitamento Finanziario Netto".
-  Cercala nella relazione sulla gestione o nelle note. Formula: debiti finanziari (obbligazioni + verso banche + verso altri finanziatori) MENO disponibilità liquide e attività finanziarie a breve.
-  Può essere POSITIVO (più debito che cassa) o NEGATIVO (più cassa che debito = posizione finanziaria netta attiva).
-- "leva_finanziaria": Debito Netto / EBITDA. Se non esposto, calcolalo. Numero puro (es. 2.5 significa 2.5x).
-  Se PFN è negativa (cassa netta), la leva è negativa.
+IMPORTANTE: le regole di estrazione variano in base al tipo di bilancio.
+Applica le regole corrette per il tipo identificato.
 
-CHECK CONTABILI OBBLIGATORI prima di rispondere:
-1. indebitamento_totale >= debito_bancario + obbligazioni (sempre, perché D contiene D.1+D.2+D.4)
-   Se non torna, hai sbagliato a leggere indebitamento_totale: cerca la voce D del Passivo, non il subtotale finanziario.
-2. patrimonio_netto < totale_attivo (sempre).
+═══════════════════════════════════════════════════════════════════
+STEP 1 — REGOLE DI ESTRAZIONE DATI FINANZIARI
+═══════════════════════════════════════════════════════════════════
+
+REGOLE GENERALI PER TUTTI I TIPI:
+- Tutti i valori in "dati_finanziari" e "struttura_debito" devono essere
+  NUMERI PURI (es. 1234567), mai stringhe.
+- Indica l'unità di misura usata nel bilancio nel campo "unita" (es.
+  "migliaia di euro", "milioni di euro", "euro").
+- Converti TUTTI i valori nella stessa unità dichiarata in "unita".
+- I valori negativi (perdite, PFN negativa quando cassa > debito) devono
+  avere il segno negativo (es. -5000).
+- Se un valore non è presente nel documento usa null, MAI 0 o "N/D".
+- Non inventare valori: meglio null che un numero sbagliato.
+- Se il bilancio contiene sia dati consolidati che separati, usa i CONSOLIDATI.
+
+CONTO ECONOMICO — regole per tipo:
+
+▶ Se "consolidato_ifrs" o "esercizio_ifrs":
+- "ricavi": "Ricavi delle vendite e delle prestazioni" (riga principale del CE).
+- "ebitda": "Margine operativo lordo" o "EBITDA" se esposto esplicitamente.
+  Se il bilancio espone solo "Ricorrente" e "Non ricorrente", usa il TOTALE
+  (reported), non solo il ricorrente.
+- "ebit": "Risultato operativo" o "EBIT".
+- "ammortamenti": somma di ammortamenti immateriali + materiali + diritti
+  d'uso (se IFRS 16) + eventuali svalutazioni.
+- "utile_netto": "Utile (perdita) di pertinenza del Gruppo" (riga finale
+  dopo le imposte e interessi di minoranza). Se consolidato, NON usare
+  "Utile di pertinenza di Terzi".
+
+▶ Se "esercizio_civilistico":
+- "ricavi": voce A.1 "Ricavi delle vendite e delle prestazioni".
+  NON usare "Valore della produzione" (voce A totale).
+- "ebit": "Differenza tra valore e costi della produzione" (A − B).
+- "ammortamenti": voce B.10 "Ammortamenti e svalutazioni" (somma B.10.a
+  + B.10.b + B.10.c + B.10.d).
+- "ebitda": NON è una voce del CE civilistico. CALCOLALO come:
+  EBITDA = (A − B) + B.10 + B.12 + B.13
+        = EBIT + Ammortamenti + Accantonamenti per rischi + Altri accantonamenti
+- "utile_netto": "Utile (perdita) dell'esercizio" — ultima riga del CE.
+
+STATO PATRIMONIALE — ATTIVO (tutti i tipi):
+- "totale_attivo": riga "Totale attivo" (sempre presente, valore finale).
+- "cassa":
+  ▶ IFRS: "Disponibilità liquide e mezzi equivalenti".
+  ▶ Civilistico: voce C.IV dell'attivo circolante "Disponibilità liquide".
+
+STATO PATRIMONIALE — PASSIVO (tutti i tipi):
+- "patrimonio_netto":
+  ▶ Consolidato IFRS: "Patrimonio netto del Gruppo e di Terzi" (totale
+    consolidato, incluse minoranze). Se chiedi quello del solo Gruppo
+    sottostimi il valore.
+  ▶ Esercizio IFRS / Civilistico: "Totale patrimonio netto" (voce A del
+    passivo in civilistico).
+
+═══════════════════════════════════════════════════════════════════
+STEP 2 — STRUTTURA DEL DEBITO (SEZIONE CRITICA, LEGGI ATTENTAMENTE)
+═══════════════════════════════════════════════════════════════════
+
+Questa sezione è la più soggetta a errori. Applica le regole per il tipo
+di bilancio identificato. Il CHECK CONTABILE deve sempre tornare:
+
+    indebitamento_totale >= debito_bancario + obbligazioni
+
+Se non torna, hai sbagliato a leggere indebitamento_totale.
+
+─────────────────────────────────────────────────────────
+CASO (C) ESERCIZIO CIVILISTICO — schema OIC / art. 2424 C.C.
+─────────────────────────────────────────────────────────
+
+- "indebitamento_totale": "TOTALE DEBITI" — voce D del Passivo (riga
+  riassuntiva di TUTTI i debiti). Include obbligazioni, debiti verso
+  banche, verso altri finanziatori, verso fornitori, tributari,
+  previdenziali, verso dipendenti, ecc. È un valore GRANDE (spesso
+  comparabile a circa metà del totale attivo).
+  ATTENZIONE: NON confondere con "totale debiti finanziari" (che è solo
+  bancario + obbligazioni).
+
+- "debito_bancario": voce D.4 "Debiti verso banche" (somma esigibili
+  entro + oltre l'esercizio).
+
+- "obbligazioni": somma voci D.1 "Obbligazioni" + D.2 "Obbligazioni
+  convertibili". Se non emette obbligazioni metti 0.
+
+- "debito_netto": "Posizione Finanziaria Netta" (PFN) o "Indebitamento
+  Finanziario Netto". Cerca nella Relazione sulla Gestione o nelle note.
+  Se non esposto, calcola: (D.1 + D.2 + D.3 finanziario + D.4 + D.5
+  finanziario) − C.IV Disponibilità liquide − C.III attività finanziarie
+  liquide.
+
+─────────────────────────────────────────────────────────
+CASO (A) CONSOLIDATO IFRS o (B) ESERCIZIO IFRS — schema ESMA
+─────────────────────────────────────────────────────────
+
+In IFRS NON esiste la "voce D" del passivo. Lo stato patrimoniale è
+organizzato per currenti/non correnti e le voci hanno nomi specifici.
+
+- "indebitamento_totale": **INDEBITAMENTO FINANZIARIO LORDO**, calcolato come:
+    Passività Finanziarie (non correnti + correnti) + Passività per Leasing
+    (non correnti + correnti)
+
+  Dove:
+  • "Passività finanziarie non correnti" = obbligazioni + finanziamenti
+    bancari MLT + finanziamenti istituzionali (BEI, CDP, ecc.) − eventuali
+    commissioni capitalizzate.
+  • "Debiti finanziari" (correnti) = scoperti c/c + quota corrente
+    finanziamenti MLT + altri debiti bancari BT.
+  • "Passività per leasing" = quote correnti + non correnti (IFRS 16).
+
+  ERRORE DA NON COMMETTERE: NON usare "Totale Passivo − Patrimonio Netto".
+  Questo include debiti commerciali, passività contrattuali, debiti tributari,
+  fondi, imposte differite — NON sono debito finanziario.
+
+- "debito_bancario": solo i finanziamenti bancari, ESCLUSO l'Eurobond e
+  ESCLUSE le passività per leasing. Include:
+  • Finanziamenti bancari MLT (quota non corrente)
+  • Finanziamenti BEI / CDP / SACE / istituzionali (quota non corrente)
+  • Quota corrente dei finanziamenti MLT
+  • Scoperti c/c e altri debiti bancari a breve
+  • Meno commissioni capitalizzate (se presenti)
+
+  ATTENZIONE DOUBLE COUNTING: se leggi il totale "Passività finanziarie"
+  che INCLUDE l'Eurobond, DEVI sottrarre l'Eurobond prima di popolare
+  questo campo. L'Eurobond va esclusivamente in "obbligazioni".
+
+- "obbligazioni": valore NOMINALE dell'Eurobond / prestito obbligazionario.
+  Tipicamente riportato nella nota "Passività finanziarie" sezione "Strumenti
+  di debito". Se la società non ha emesso bond metti 0.
+
+- "debito_netto": **Posizione Finanziaria Netta INCLUSIVA delle passività
+  per leasing** secondo schema ESMA 32-382-1138. È il valore ufficiale
+  pubblicato dalla società nella nota "Posizione Finanziaria Netta".
+  Formula: indebitamento_totale − Disponibilità liquide − Altre attività
+  finanziarie correnti liquide.
+
+  NOTA METODOLOGICA: alcune società espongono DUE valori di PFN (incl. e
+  escl. leasing). Per questo campo usa SEMPRE la versione INCL. leasing
+  (schema ESMA standard). Nel campo "note" della struttura debito, indica
+  anche il valore ESCL. leasing se dichiarato dalla società (utile per
+  covenant).
+
+- "leva_finanziaria": se la società dichiara ESPLICITAMENTE il proprio
+  "Leverage Ratio" ai fini dei covenant finanziari, usa QUEL valore e
+  cita la definizione nel campo "note". Altrimenti calcola:
+      leva = debito_netto / ebitda
+  Esempio per bilanci IFRS con covenant: tipicamente la società espone
+  "Indebitamento finanziario netto escl. leasing / EBITDA LTM normalizzato".
+  Se trovi questo valore (es. 1,63x), usalo e annota la definizione.
+
+═══════════════════════════════════════════════════════════════════
+STEP 3 — CHECK CONTABILI OBBLIGATORI prima di rispondere
+═══════════════════════════════════════════════════════════════════
+
+Esegui questi controlli e correggi se non tornano. Se dopo 2 tentativi
+ancora non tornano, annota il disallineamento nel campo "note" della
+struttura debito.
+
+1. indebitamento_totale >= debito_bancario + obbligazioni
+   Se fallisce:
+   ▶ Per civilistico: hai letto "totale debiti finanziari" invece della
+     voce D del Passivo. Cerca "TOTALE DEBITI" come riga riassuntiva D.
+   ▶ Per IFRS: hai escluso qualche componente (forse leasing). Ricontrolla
+     che indebitamento_totale includa passività finanziarie + passività
+     per leasing (correnti + non correnti).
+
+2. patrimonio_netto < totale_attivo (sempre, è un'identità contabile).
+
 3. ebitda ≈ ebit + ammortamenti (tolleranza 5%).
-4. cassa < totale_attivo.
+   Se fallisce per civilistico, verifica di aver incluso anche B.12 e B.13
+   (accantonamenti) nel calcolo EBITDA.
+
+4. cassa < totale_attivo (sempre).
+
+5. Double-check Eurobond per IFRS: se "obbligazioni" > 0, verifica che
+   "debito_bancario" NON includa lo stesso ammontare (no double counting).
+
+6. Per IFRS: indebitamento_totale ≈ (debito_bancario + obbligazioni +
+   passività_per_leasing). Se leggi una discrepanza grossa, ci sono voci
+   residuali ("debiti per acquisizioni", "debiti v/altri finanziatori")
+   che vanno incluse in indebitamento_totale ma non in debito_bancario.
+
+═══════════════════════════════════════════════════════════════════
+SCHEMA JSON DI OUTPUT
+═══════════════════════════════════════════════════════════════════
 
 {{
   "nome_azienda": "{nome}",
@@ -1530,13 +1691,44 @@ CHECK CONTABILI OBBLIGATORI prima di rispondere:
   "note_aggiuntive": ""
 }}
 
-Se un testo non è disponibile scrivi N/D."""
+═══════════════════════════════════════════════════════════════════
+ISTRUZIONI PER IL CAMPO "note" DELLA STRUTTURA DEBITO
+═══════════════════════════════════════════════════════════════════
+
+Nel campo "note" di struttura_debito, includi SEMPRE queste informazioni
+quando applicabili, separate da " | ":
+
+1. Tipo di bilancio identificato: es. "tipo_bilancio: consolidato_ifrs"
+2. Metodologia PFN: es. "PFN incl. leasing (schema ESMA)" oppure
+   "PFN escl. leasing" oppure "PFN ricostruita (non esposta dalla società)"
+3. Se disponibile, PFN alternativa: es. "PFN escl. leasing: 961.805
+   (rilevante per covenant)"
+4. Se applicabile, definizione leva ufficiale: es. "Leverage covenant
+   dichiarato: 1,63x (PFN escl. leasing / EBITDA normalizzato)"
+5. Eventuali discrepanze nei check contabili.
+
+═══════════════════════════════════════════════════════════════════
+ISTRUZIONI PER IL CAMPO "scadenze_principali"
+═══════════════════════════════════════════════════════════════════
+
+Riporta il profilo di scadenza del debito bancario e obbligazionario
+(esclusi leasing) in formato sintetico, es.:
+"2025: €131,9M | 2026: €245,4M | 2027: €430,4M (di cui Eurobond €350M) |
+2028: €80,7M | 2029-2033: €238,1M"
+
+Se non disponibile, scrivi "N/D".
+
+═══════════════════════════════════════════════════════════════════
+
+Se un testo qualitativo (overview, core_business, ecc.) non è disponibile
+scrivi "N/D". Per i numeri usa sempre null come indicato sopra.
+"""
 
                 for tentativo in range(3):
                     try:
                         messaggio = client.messages.create(
                             model="claude-sonnet-4-6",
-                            max_tokens=4000,
+                            max_tokens=6000,
                             messages=[{"role": "user", "content": [
                                 {
                                     "type": "document",
