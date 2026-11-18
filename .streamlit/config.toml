@@ -1,0 +1,4 @@
+[server]
+# Dimensione massima di un file caricato, in MB (il valore predefinito è 200).
+# Deve restare allineata a DIMENSIONE_MAX_MB in bilancio_engine.py.
+maxUploadSize = 150

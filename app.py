@@ -1,12 +1,13 @@
 import streamlit as st
 import anthropic
-import pdfplumber
 import PyPDF2
 import io
 import os
 import requests
 import json
 import base64
+import hashlib
+import html
 import time
 import gspread
 from pypdf import PdfReader, PdfWriter
@@ -19,6 +20,8 @@ from docx import Document
 from docx.shared import Pt, RGBColor, Cm, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+
+import bilancio_engine as be
 
 # ── Configurazione pagina ─────────────────────────────────────────────────────
 
@@ -86,44 +89,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Costanti keyword per ricerca sezioni finanziarie ─────────────────────────
-
-FINANCIAL_KEYWORDS = [
-    ("stato patrimoniale",          10),
-    ("conto economico",             10),
-    ("rendiconto finanziario",      10),
-    ("prospetto delle variazioni",   8),
-    ("nota integrativa",             5),
-    ("posizione finanziaria netta",  9),
-    ("indebitamento finanziario",    9),
-    ("pfn",                          6),
-    ("ricavi delle vendite",         6),
-    ("ricavi",                       4),
-    ("ebitda",                       8),
-    ("ebit",                         7),
-    ("utile netto",                  6),
-    ("perdita netto",                6),
-    ("risultato netto",              6),
-    ("risultato operativo",          6),
-    ("ammortamenti",                 5),
-    ("totale attivo",                6),
-    ("totale passivo",               6),
-    ("patrimonio netto",             7),
-    ("capitale sociale",             4),
-    ("debiti finanziari",            7),
-    ("disponibilità liquide",        5),
-    ("(migliaia di euro)",           8),
-    ("(milioni di euro)",            8),
-    ("in migliaia",                  7),
-    ("in milioni",                   7),
-    ("esercizio chiuso",             6),
-    ("31 dicembre",                  5),
-    ("31/12/",                       5),
-]
-
-SCORE_THRESHOLD = 12
-CONTEXT_PAGES = 0
-
 # ── Normalizzazione e validazione KPI ────────────────────────────────────────
 
 # Fattori di conversione verso EURO INTERI
@@ -140,6 +105,11 @@ UNIT_FACTORS = {
     "mln€": 1_000_000,
     "miliardi di euro": 1_000_000_000,
     "miliardi": 1_000_000_000,
+    "thousand": 1_000,
+    "/000": 1_000,
+    "000": 1_000,
+    "million": 1_000_000,
+    "billion": 1_000_000_000,
 }
 
 KPI_NUMERICI = [
@@ -159,11 +129,12 @@ def normalizza_kpi(report: dict) -> dict:
     unita_raw = str(fin.get("unita", "migliaia di euro")).lower().strip()
     fattore = UNIT_FACTORS.get(unita_raw, None)
 
-    # Prova match parziale se non trova esatto
+    # Prova match parziale se non trova esatto. Le chiavi più lunghe hanno la
+    # precedenza: "in migliaia di euro" contiene anche "euro", ma vale 1.000.
     if fattore is None:
-        for chiave, val in UNIT_FACTORS.items():
+        for chiave in sorted(UNIT_FACTORS, key=len, reverse=True):
             if chiave in unita_raw:
-                fattore = val
+                fattore = UNIT_FACTORS[chiave]
                 break
     if fattore is None:
         fattore = 1_000  # default migliaia se non riconosciuto
@@ -245,7 +216,8 @@ def valida_kpi(report: dict) -> list:
     # ── Check identità contabili ─────────────────────────────────────────────
 
     # EBITDA = EBIT + Ammortamenti (tolleranza 5%)
-    if ebitda is not None and ebit is not None and amm is not None:
+    if (ebitda is not None and ebit is not None and amm is not None
+            and report.get("ebitda_metodo") != "calcolato"):
         atteso = ebit + amm
         if atteso != 0 and abs(ebitda - atteso) / abs(atteso) > 0.05:
             warnings.append({
@@ -464,135 +436,132 @@ def render_pannello_validazione(warnings: list):
     )
 
 
-# ── Funzioni PDF intelligente ─────────────────────────────────────────────────
+# ── Supporto analisi bilanci (la logica è in bilancio_engine.py) ──────────────
 
-def _score_page(text: str) -> int:
-    text_lower = text.lower()
-    score = 0
-    for keyword, weight in FINANCIAL_KEYWORDS:
-        if keyword in text_lower:
-            score += weight
-    return score
+def _cache_sessione(prefisso: str, contenuto: bytes, funzione):
+    """Esegue `funzione` una sola volta per contenuto e ne conserva il risultato.
+    Senza questa cache ogni clic o tasto premuto rifaceva l'operazione
+    (comprese le chiamate a pagamento a Claude per la visura)."""
+    chiave = f"{prefisso}_{hashlib.md5(contenuto).hexdigest()}"
+    if chiave not in st.session_state:
+        st.session_state[chiave] = funzione()
+    return st.session_state[chiave]
 
 
-def analizza_pdf(pdf_bytes: bytes) -> dict:
-    """
-    Analizza un PDF e trova le pagine con dati finanziari.
-    Restituisce info sull'analisi e la modalità di estrazione.
-    """
-    result = {
-        "mode": "text",
-        "total_pages": 0,
-        "selected_pages": [],
-        "page_scores": [],
-        "avg_chars": 0.0,
-        "sections_found": [],
-    }
+def _intervalli(pagine: list) -> str:
+    """[1,2,3,7,9,10] -> "1-3, 7, 9-10" """
+    if not pagine:
+        return "—"
+    pagine = sorted(set(pagine))
+    gruppi, inizio, prec = [], pagine[0], pagine[0]
+    for p in pagine[1:]:
+        if p == prec + 1:
+            prec = p
+            continue
+        gruppi.append((inizio, prec))
+        inizio = prec = p
+    gruppi.append((inizio, prec))
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in gruppi)
 
+
+def fmt_leva(debito: dict) -> str:
+    v = debito.get("leva_finanziaria") if isinstance(debito, dict) else None
+    if v in (None, "", "N/D"):
+        return "N/D"
     try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            total = len(pdf.pages)
-            result["total_pages"] = total
-
-            texts, scores, char_counts = [], [], []
-            for page in pdf.pages:
-                t = page.extract_text() or ""
-                texts.append(t)
-                scores.append(_score_page(t))
-                char_counts.append(len(t))
-
-            result["page_scores"] = scores
-            avg_chars = sum(char_counts) / total if total > 0 else 0
-            result["avg_chars"] = avg_chars
-
-            # PDF scansionato: meno di 100 caratteri per pagina in media
-            if avg_chars < 100:
-                result["mode"] = "scanned"
-                result["selected_pages"] = list(range(total))
-                return result
-
-            # Selezione pagine rilevanti + contesto
-            relevant = set()
-            for i, score in enumerate(scores):
-                if score >= SCORE_THRESHOLD:
-                    for j in range(
-                        max(0, i - CONTEXT_PAGES),
-                        min(total, i + CONTEXT_PAGES + 1)
-                    ):
-                        relevant.add(j)
-
-            # Fallback: nessuna sezione trovata → prendiamo la metà centrale
-            if not relevant:
-                start = max(0, total // 4)
-                end = min(total, 3 * total // 4)
-                relevant = set(range(start, end))
-                result["mode"] = "fallback"
-
-            # Cap massimo 25 pagine per rispettare i rate limit API
-            selected_sorted = sorted(relevant)
-            if len(selected_sorted) > 25:
-                # Tieni le pagine con punteggio più alto
-                scored = sorted(selected_sorted, key=lambda i: scores[i], reverse=True)
-                selected_sorted = sorted(scored[:25])
-            result["selected_pages"] = selected_sorted
-
-            # Sezioni identificate
-            all_text = " ".join(texts).lower()
-            sections = []
-            for kw, label in [
-                ("stato patrimoniale", "Stato Patrimoniale"),
-                ("conto economico", "Conto Economico"),
-                ("rendiconto finanziario", "Rendiconto Finanziario"),
-                ("posizione finanziaria netta", "PFN"),
-                ("nota integrativa", "Nota Integrativa"),
-            ]:
-                if kw in all_text:
-                    sections.append(label)
-            result["sections_found"] = sections
-
-    except Exception as e:
-        # Se pdfplumber fallisce, trattalo come scansionato
-        result["mode"] = "scanned"
-        result["error"] = str(e)
-        try:
-            reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-            result["total_pages"] = len(reader.pages)
-            result["selected_pages"] = list(range(len(reader.pages)))
-        except:
-            pass
-
-    return result
+        return f"{float(v):.2f}x"
+    except (TypeError, ValueError):
+        return str(v)
 
 
-def costruisci_pdf_chirurgico(pdf_bytes: bytes, page_indices: list) -> bytes:
-    """Costruisce un PDF con solo le pagine selezionate (0-indexed)."""
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    writer = PdfWriter()
-    for i in page_indices:
-        if 0 <= i < len(reader.pages):
-            writer.add_page(reader.pages[i])
-    output = io.BytesIO()
-    writer.write(output)
-    return output.getvalue()
+def render_fonti_verifica(report: dict):
+    """Pannello con la pagina di origine di ogni numero e l'esito della seconda lettura."""
+    estr = report.get("_estrazione") or {}
+    fonti = report.get("fonti") or {}
+    registro = report.get("_verifica") or []
+    note_calc = report.get("_note_calcolo") or []
+    if not (estr or fonti or registro):
+        return
 
+    corretti = [r for r in registro if r.get("esito") == "corretto"]
+    dubbi = [r for r in registro if r.get("esito") in ("non_verificabile", "da_verificare", "non_eseguita")]
+    testi = [r for r in registro if r.get("esito") == "testo_da_verificare"]
+    confermati = [r for r in registro if r.get("esito") == "ok"]
 
-def prepara_bilancio(pdf_bytes: bytes) -> tuple:
-    """
-    Entry point principale per preparare un bilancio per Claude.
-    Restituisce (pdf_da_inviare_bytes, info_dict).
-    """
-    info = analizza_pdf(pdf_bytes)
+    if registro:
+        if not (corretti or dubbi or testi):
+            colore, bg, titolo = "#4caf50", "#1a2e1a", (
+                f"✅ <b>Seconda lettura</b> — {len(confermati)} valori riletti e confermati")
+        else:
+            colore, bg = "#e65100", "#2e2a1a"
+            parti = [f"{len(confermati)} confermati"]
+            if corretti:
+                parti.append(f"{len(corretti)} corretti")
+            if dubbi:
+                parti.append(f"{len(dubbi)} non verificabili")
+            if testi:
+                parti.append(f"{len(testi)} affermazioni da controllare")
+            titolo = "🟡 <b>Seconda lettura</b> — " + ", ".join(parti)
+        st.markdown(
+            f'<div style="background:{bg};border:1px solid {colore};border-radius:8px;'
+            f'padding:10px 14px;margin:8px 0;color:{colore};font-size:13px;">{titolo}</div>',
+            unsafe_allow_html=True
+        )
 
-    if info["mode"] == "scanned":
-        return pdf_bytes, info
+    with st.expander("🔎 Fonti dei dati e controllo", expanded=bool(corretti or dubbi or testi)):
+        if estr:
+            st.caption(
+                f"Perimetro: {report.get('perimetro') or 'N/D'} · "
+                f"Tipo bilancio: {report.get('tipo_bilancio') or 'N/D'} · "
+                f"Pagine analizzate: {_intervalli(estr.get('pagine_inviate', []))} "
+                f"su {estr.get('pagine_totali', '?')} ({estr.get('criterio', '')}) · "
+                f"Modello: {estr.get('modello', 'N/D')}"
+            )
 
-    surgical = costruisci_pdf_chirurgico(pdf_bytes, info["selected_pages"])
-    info["pagine_inviate"] = len(info["selected_pages"])
-    info["riduzione_pct"] = round(
-        (1 - len(surgical) / len(pdf_bytes)) * 100, 1
-    ) if len(pdf_bytes) > 0 else 0
+        fin = report.get("dati_finanziari") or {}
+        deb = report.get("struttura_debito") if isinstance(report.get("struttura_debito"), dict) else {}
+        righe = []
+        for campo in be.KPI_TUTTI:
+            valore = (fin if campo in be.KPI_FINANZIARI else deb).get(campo)
+            fonte = fonti.get(campo) or {}
+            if valore is None and not fonte.get("voce"):
+                continue
+            righe.append({
+                "Dato": be.ETICHETTE_KPI[campo],
+                "Valore": _fmt(valore) if report.get("_normalizzato") else str(valore),
+                "Pagina": str(fonte.get("pagina") or "—"),
+                "Voce letta nel bilancio": fonte.get("voce") or "—",
+                "Valore letto / calcolo": fonte.get("calcolo") or fonte.get("letto") or "—",
+            })
+        if righe:
+            st.dataframe(righe, hide_index=True, use_container_width=True)
 
-    return surgical, info
+        def _lista(titolo, colore, voci):
+            if not voci:
+                return
+            corpo = "".join(f'<div style="margin:4px 0;font-size:12px;">{v}</div>' for v in voci)
+            st.markdown(
+                f'<div style="border-left:3px solid {colore};padding:6px 12px;margin:8px 0;">'
+                f'<div style="color:{colore};font-weight:700;font-size:13px;">{titolo}</div>{corpo}</div>',
+                unsafe_allow_html=True
+            )
+
+        esc = html.escape
+        _lista("Valori corretti dalla seconda lettura", "#ff9800", [
+            f"<b>{esc(be.ETICHETTE_KPI.get(r['campo'], r['campo']))}</b>: "
+            f"{esc(str(r.get('prima')))} → {esc(str(r.get('dopo')))} "
+            f"(unità del bilancio) — {esc(str(r.get('motivo', '')))}"
+            for r in corretti
+        ])
+        _lista("Valori che la seconda lettura non ha potuto verificare", "#ff9800", [
+            f"<b>{esc(be.ETICHETTE_KPI.get(r['campo'], r['campo']))}</b>: {esc(str(r.get('motivo', '')))}"
+            for r in dubbi
+        ])
+        _lista("Affermazioni senza riscontro nel bilancio — da controllare", "#ff9800", [
+            f"<b>{esc(str(r.get('campo', '')))}</b>: «{esc(str(r.get('frase', '')))}» — {esc(str(r.get('motivo', '')))}"
+            for r in testi
+        ])
+        _lista("Ricalcoli del programma", "#90caf9", [esc(str(n)) for n in note_calc])
 
 # ── Funzioni Google Sheets ────────────────────────────────────────────────────
 
@@ -916,6 +885,53 @@ def genera_excel(reports: list) -> bytes:
         ws.column_dimensions["B"].width = 20
         ws.column_dimensions["C"].width = 35
 
+    # ── Foglio Fonti: pagina e voce di origine di ogni numero ────────────────
+    if any(r["report"].get("fonti") for r in reports):
+        ws_f = wb.create_sheet("Fonti")
+        ws_f.sheet_view.showGridLines = False
+        intestazioni = ["Azienda", "Anno", "Dato", "Valore (EUR)", "Pagina PDF",
+                        "Voce letta nel bilancio", "Valore letto / calcolo", "Controllo"]
+        for c, titolo in enumerate(intestazioni, start=1):
+            _cell_style(ws_f, 1, c, titolo, bold=True, bg=HL_GRIGIO_S, fg=HL_VERDE, border=True)
+        etichette_esito = {
+            "ok": "Confermato dalla seconda lettura",
+            "corretto": "Corretto dalla seconda lettura",
+            "non_verificabile": "Non verificabile",
+            "da_verificare": "Da verificare",
+        }
+        riga = 2
+        for r in reports:
+            report = r["report"]
+            fonti = report.get("fonti") or {}
+            fin = report.get("dati_finanziari") or {}
+            debito = report.get("struttura_debito") if isinstance(report.get("struttura_debito"), dict) else {}
+            esiti = {e.get("campo"): e.get("esito") for e in report.get("_verifica") or []}
+            for campo in be.KPI_TUTTI:
+                valore = (fin if campo in be.KPI_FINANZIARI else debito).get(campo)
+                fonte = fonti.get(campo) or {}
+                if valore is None and not fonte.get("voce"):
+                    continue
+                bg = HL_NERO if riga % 2 == 0 else HL_GRIGIO_S
+                try:
+                    valore_num = float(valore) if valore is not None else None
+                except (TypeError, ValueError):
+                    valore_num = None
+                celle = [
+                    (r["nome"], None, "left"), (r["anno"], None, "left"),
+                    (be.ETICHETTE_KPI[campo], None, "left"),
+                    (valore_num, "€ #,##0", "right"),
+                    (fonte.get("pagina"), None, "right"),
+                    (fonte.get("voce") or "", None, "left"),
+                    (fonte.get("calcolo") or fonte.get("letto") or "", None, "left"),
+                    (etichette_esito.get(esiti.get(campo), ""), None, "left"),
+                ]
+                for c, (val, fmt, align) in enumerate(celle, start=1):
+                    _cell_style(ws_f, riga, c, val, bg=bg, fg=HL_BIANCO, align=align,
+                                border=True, num_format=fmt)
+                riga += 1
+        for lettera, larghezza in zip("ABCDEFGH", [26, 8, 22, 18, 11, 48, 40, 30]):
+            ws_f.column_dimensions[lettera].width = larghezza
+
     # Output bytes
     buf = io.BytesIO()
     wb.save(buf)
@@ -1191,8 +1207,9 @@ if st.session_state["pagina"] == "genera":
 
     st.markdown("### 📂 Carica i bilanci")
     st.caption(
-        "Puoi caricare fino a 5 bilanci PDF completi contemporaneamente. "
-        "Il sistema trova automaticamente le pagine finanziarie rilevanti — "
+        "Puoi caricare fino a 5 bilanci PDF completi contemporaneamente "
+        f"(massimo {be.DIMENSIONE_MAX_MB} MB ciascuno). "
+        "Il sistema trova automaticamente le pagine rilevanti — "
         "non serve estrarre le pagine manualmente."
     )
 
@@ -1204,8 +1221,39 @@ if st.session_state["pagina"] == "genera":
         label_visibility="collapsed",
     )
 
+    with st.expander("⚙️ Opzioni di analisi", expanded=False):
+        col_o1, col_o2, col_o3 = st.columns(3)
+        with col_o1:
+            perimetro_scelto = st.selectbox(
+                "Dati da usare",
+                options=list(be.PERIMETRI.keys()),
+                format_func=lambda k: be.PERIMETRI[k],
+                key="opt_perimetro",
+                help="Se il PDF contiene sia il consolidato sia il bilancio d'esercizio, "
+                     "indica quale usare. Tutti i numeri del report useranno lo stesso perimetro.",
+            )
+        with col_o2:
+            pagine_max = st.selectbox(
+                "Pagine massime per bilancio",
+                options=[25, 40, 60, 100],
+                index=2,
+                key="opt_pagine_max",
+                help="Più pagine = meno dati mancanti, ma analisi più lenta e costosa. "
+                     "Se l'account API non regge la richiesta, il sistema riduce le pagine da solo.",
+            )
+        with col_o3:
+            verifica_attiva = st.checkbox(
+                "Seconda lettura di controllo",
+                value=True,
+                key="opt_verifica",
+                help="Dopo l'estrazione, Claude rilegge il bilancio e ricontrolla ogni numero "
+                     "(colonna dell'anno, perimetro, unità, voce). Consigliata.",
+            )
+
     # Form metadati + analisi per ogni bilancio caricato
     bilanci_pronti = []   # lista di dict pronti per Claude
+    chiavi_attive = set()
+    anni_disponibili = [str(y) for y in range(datetime.now().year, 2017, -1)]
 
     if bilanci_files:
         if len(bilanci_files) > 5:
@@ -1217,7 +1265,7 @@ if st.session_state["pagina"] == "genera":
         for idx, f in enumerate(bilanci_files):
             with st.container():
                 st.markdown(f"**📄 {f.name}**")
-                col_m1, col_m2 = st.columns([3, 1])
+                col_m1, col_m2, col_m3 = st.columns([3, 1, 2])
                 with col_m1:
                     rs = st.text_input(
                         "Ragione sociale",
@@ -1227,23 +1275,49 @@ if st.session_state["pagina"] == "genera":
                 with col_m2:
                     anno = st.selectbox(
                         "Anno bilancio",
-                        options=[str(y) for y in range(2025, 2017, -1)],
+                        options=anni_disponibili,
+                        index=1 if len(anni_disponibili) > 1 else 0,
                         key=f"anno_{idx}",
                     )
+                with col_m3:
+                    pagine_manuali = st.text_input(
+                        "Pagine da analizzare (opzionale)",
+                        key=f"pagine_{idx}",
+                        placeholder="es. 2-9, 105-126",
+                        help="Lascia vuoto per la scelta automatica. Compila solo se vuoi "
+                             "decidere tu quali pagine del PDF inviare.",
+                    )
 
-                # Analisi pagine (cached in session_state per evitare ri-analisi)
-                cache_key = f"pdf_analysis_{f.name}_{f.size}"
+                # Analisi pagine: una volta sola per file e opzioni (cache di sessione).
+                # In memoria resta solo il PDF ridotto, non l'originale.
+                cache_key = "pdf_analysis_" + hashlib.md5(
+                    f"{f.name}|{f.size}|{perimetro_scelto}|{pagine_max}|{pagine_manuali.strip()}".encode()
+                ).hexdigest()
+                chiavi_attive.add(cache_key)
+
                 if cache_key not in st.session_state:
                     with st.spinner(f"Analisi pagine di {f.name}..."):
-                        raw_bytes = f.read()
-                        surgical_bytes, info = prepara_bilancio(raw_bytes)
-                        st.session_state[cache_key] = {
-                            "surgical": surgical_bytes,
-                            "info": info,
-                        }
-                else:
-                    surgical_bytes = st.session_state[cache_key]["surgical"]
-                    info = st.session_state[cache_key]["info"]
+                        try:
+                            raw_bytes = f.getvalue()
+                            surgical_bytes, info = be.prepara_bilancio(
+                                raw_bytes, perimetro_scelto, pagine_max, pagine_manuali
+                            )
+                            del raw_bytes
+                            st.session_state[cache_key] = {
+                                "surgical": surgical_bytes,
+                                "info": info,
+                            }
+                        except (be.ErroreEstrazione, ValueError) as e:
+                            st.error(f"❌ {f.name}: {e}")
+                            st.markdown("---")
+                            continue
+                        except Exception as e:
+                            st.error(f"❌ Impossibile leggere {f.name}: {type(e).__name__}: {e}")
+                            st.markdown("---")
+                            continue
+
+                surgical_bytes = st.session_state[cache_key]["surgical"]
+                info = st.session_state[cache_key]["info"]
 
                 # Badge risultato analisi
                 mode = info.get("mode", "text")
@@ -1251,56 +1325,85 @@ if st.session_state["pagina"] == "genera":
                 selected = len(info.get("selected_pages", []))
                 sections = ", ".join(info.get("sections_found", [])) or "—"
                 riduzione = info.get("riduzione_pct", 0)
+                elenco_pagine = _intervalli([p + 1 for p in info.get("selected_pages", [])])
 
                 if mode == "scanned":
                     st.markdown(
                         f'<div class="pdf-badge pdf-badge-scan">'
-                        f'📷 PDF scansionato — {total} pagine totali inviate a Claude direttamente.'
+                        f'📷 PDF scansionato — invio {selected} pagine su {total} '
+                        f'({info.get("criterio", "")}). Pagine: {elenco_pagine}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if selected < total:
+                        st.caption(
+                            "Nei PDF scansionati il testo non è leggibile, quindi le pagine sono scelte "
+                            "per posizione. Se conosci le pagine giuste, indicale nel campo qui sopra."
+                        )
+                elif mode == "manual":
+                    st.markdown(
+                        f'<div class="pdf-badge pdf-badge-ok">'
+                        f'✅ {selected} pagine indicate a mano su {total} totali. Pagine: {elenco_pagine}'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
                 elif mode == "fallback":
                     st.markdown(
                         f'<div class="pdf-badge pdf-badge-warn">'
-                        f'⚠️ Layout atipico — invio {selected} pagine centrali su {total} totali.'
+                        f'⚠️ Layout atipico — invio {selected} pagine centrali su {total} totali. '
+                        f'Conviene indicare le pagine a mano.'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
                 else:
+                    perimetro_txt = ""
+                    if info.get("ha_consolidato") and info.get("ha_esercizio"):
+                        perimetro_txt = f' — Il PDF contiene consolidato ed esercizio: privilegiato il {info.get("perimetro")}'
                     st.markdown(
                         f'<div class="pdf-badge pdf-badge-ok">'
                         f'✅ {selected} pagine rilevanti su {total} totali '
-                        f'({riduzione}% riduzione) — Sezioni: {sections}'
+                        f'({riduzione}% riduzione) — Sezioni: {sections}{perimetro_txt}'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
 
-                # Pannello debug opzionale
+                # Pannello di dettaglio opzionale
                 with st.expander("🔍 Dettaglio analisi pagine", expanded=False):
+                    st.caption(
+                        f"Pagine inviate: {elenco_pagine} · "
+                        f"Caratteri medi per pagina: {info.get('avg_chars', 0):.0f} · "
+                        f"Pagine scansionate: {info.get('scanned_pages', 0)} · "
+                        f"PDF: {info.get('mb_originale', '?')} MB → {info.get('mb_inviati', '?')} MB"
+                    )
                     scores = info.get("page_scores", [])
+                    categorie = info.get("page_categories", [])
                     selected_set = set(info.get("selected_pages", []))
-                    if scores:
-                        st.caption(f"Soglia punteggio: {SCORE_THRESHOLD} | "
-                                   f"Caratteri medi per pagina: {info.get('avg_chars', 0):.0f}")
-                        cols_dbg = st.columns(10)
-                        for i, score in enumerate(scores[:50]):
-                            col = cols_dbg[i % 10]
+                    if scores and any(scores):
+                        sigle = {"prospetti": "PRO", "pfn": "PFN", "debito": "DEB",
+                                 "ownership": "SOC", "ma": "M&A", "overview": "ATT"}
+                        celle = ""
+                        for i, score in enumerate(scores[:300]):
                             color = "#c8e04a" if i in selected_set else "#555"
-                            col.markdown(
-                                f"<div style='text-align:center;font-size:10px;"
-                                f"color:{color};border:1px solid {color};"
+                            sigla = sigle.get(categorie[i], "") if i < len(categorie) else ""
+                            celle += (
+                                f"<div style='display:inline-block;width:46px;text-align:center;"
+                                f"font-size:10px;color:{color};border:1px solid {color};"
                                 f"border-radius:4px;padding:3px;margin:2px;'>"
-                                f"<b>{i+1}</b><br>{score}</div>",
-                                unsafe_allow_html=True,
+                                f"<b>{i+1}</b><br>{sigla or '·'} {score}</div>"
                             )
-                        if len(scores) > 50:
-                            st.caption(f"... e altre {len(scores)-50} pagine.")
+                        st.markdown(celle, unsafe_allow_html=True)
+                        st.caption(
+                            "In verde le pagine inviate. PRO = prospetti contabili, PFN = posizione "
+                            "finanziaria, DEB = note sul debito, SOC = soci, M&A = operazioni, "
+                            "ATT = attività."
+                            + (f" Mostrate le prime 300 di {len(scores)} pagine." if len(scores) > 300 else "")
+                        )
 
                 if rs.strip():
                     bilanci_pronti.append({
                         "ragione_sociale": rs.strip(),
                         "anno": anno,
-                        "pdf_b64": base64.b64encode(surgical_bytes).decode(),
+                        "pdf_bytes": surgical_bytes,
                         "filename": f.name,
                         "info": info,
                     })
@@ -1308,6 +1411,11 @@ if st.session_state["pagina"] == "genera":
                     st.warning("⬆️ Inserisci la ragione sociale per includere questo bilancio.")
 
                 st.markdown("---")
+
+    # Libera la memoria delle analisi di file non più caricati (o con opzioni cambiate)
+    for chiave in [k for k in list(st.session_state.keys())
+                   if str(k).startswith("pdf_analysis_") and k not in chiavi_attive]:
+        del st.session_state[chiave]
 
     # ── ALTRI DOCUMENTI (invariati) ───────────────────────────────────────────
 
@@ -1334,49 +1442,66 @@ if st.session_state["pagina"] == "genera":
             key="visura", label_visibility="collapsed"
         )
 
-    # Raccolta testi documenti supplementari
+    # Raccolta testi documenti supplementari.
+    # Ogni documento viene letto una sola volta per sessione (cache): prima la
+    # visura veniva rimandata a Claude a ogni clic sulla pagina.
     testi_supplementari = {}
     documenti_binari = {}
 
     if mergermarket:
-        contenuto = mergermarket.read()
-        if mergermarket.name.endswith(".pdf"):
-            reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
-            testo = "".join(p.extract_text() or "" for p in reader.pages)
-        else:
-            testo = contenuto.decode("utf-8")
-        testi_supplementari["Mergermarket"] = testo
-        documenti_binari[mergermarket.name] = contenuto
-        st.success("✅ Mergermarket caricato")
+        contenuto = mergermarket.getvalue()
+
+        def _leggi_mergermarket(contenuto=contenuto, nome_file=mergermarket.name):
+            if nome_file.lower().endswith(".pdf"):
+                reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
+                return "".join(p.extract_text() or "" for p in reader.pages)
+            return contenuto.decode("utf-8", errors="replace")
+
+        try:
+            testi_supplementari["Mergermarket"] = _cache_sessione(
+                "suppl_merger", contenuto, _leggi_mergermarket
+            )
+            documenti_binari[mergermarket.name] = contenuto
+            st.success("✅ Mergermarket caricato")
+        except Exception as e:
+            st.error(f"❌ Impossibile leggere l'export Mergermarket: {e}")
 
     if url_azienda:
-        testi_supplementari["Sito Aziendale"] = estrai_testo_url(url_azienda)
+        testi_supplementari["Sito Aziendale"] = _cache_sessione(
+            "suppl_url", url_azienda.strip().encode(), lambda: estrai_testo_url(url_azienda.strip())
+        )
         st.success("✅ URL acquisito")
 
     if visura:
-        contenuto = visura.read()
-        try:
-            client_temp = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-            resp_visura = client_temp.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=2000,
-                messages=[{"role": "user", "content": [
+        contenuto = visura.getvalue()
+
+        def _leggi_visura(contenuto=contenuto):
+            try:
+                client_temp = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+                return be.testo_da_modello_veloce(client_temp, [
                     {"type": "document", "source": {
                         "type": "base64", "media_type": "application/pdf",
                         "data": base64.b64encode(contenuto).decode()
                     }},
-                    {"type": "text", "text": "Estrai tutte le informazioni rilevanti: "
-                     "ragione sociale, sede, codice fiscale, soci, amministratori, "
-                     "capitale sociale, oggetto sociale."}
-                ]}]
-            )
-            testo_visura = resp_visura.content[0].text
-        except:
-            reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
-            testo_visura = "".join(p.extract_text() or "" for p in reader.pages)
-        testi_supplementari["Visura Camerale"] = testo_visura
-        documenti_binari[visura.name] = contenuto
-        st.success("✅ Visura caricata")
+                    {"type": "text", "text": "Trascrivi fedelmente tutte le informazioni rilevanti "
+                     "della visura, senza interpretarle e senza aggiungere nulla: ragione sociale, "
+                     "forma giuridica, sede, codice fiscale, data di costituzione, capitale sociale, "
+                     "soci con quote, forma di amministrazione esattamente come indicata, "
+                     "amministratori e cariche, oggetto sociale, data di estrazione della visura."}
+                ])
+            except Exception:
+                reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
+                return "".join(p.extract_text() or "" for p in reader.pages)
+
+        try:
+            with st.spinner("Lettura della visura..."):
+                testi_supplementari["Visura Camerale"] = _cache_sessione(
+                    "suppl_visura", contenuto, _leggi_visura
+                )
+            documenti_binari[visura.name] = contenuto
+            st.success("✅ Visura caricata")
+        except Exception as e:
+            st.error(f"❌ Impossibile leggere la visura: {e}")
 
     # ── PULSANTE GENERA ───────────────────────────────────────────────────────
 
@@ -1389,6 +1514,15 @@ if st.session_state["pagina"] == "genera":
     if not ha_contenuto:
         st.info("Carica almeno un bilancio o documento per procedere.")
 
+    # Senza bilanci il nome dell'azienda va chiesto PRIMA del pulsante
+    # (dentro il pulsante il campo spariva al primo clic).
+    nome_solo_suppl = ""
+    if not bilanci_pronti and testi_supplementari:
+        nome_solo_suppl = st.text_input(
+            "Nome dell'azienda", placeholder="es. Eco Eridania S.p.A.",
+            key="nome_solo_suppl"
+        )
+
     if st.button("🚀 Genera Report", disabled=not ha_contenuto):
 
         lingua_prompt = "in inglese" if lingua == "English" else "in italiano"
@@ -1400,427 +1534,68 @@ if st.session_state["pagina"] == "genera":
         # ── Caso A: uno o più bilanci caricati → report per ciascuno ─────────
         if bilanci_pronti:
             totale = len(bilanci_pronti)
+            generati = 0
             progress = st.progress(0, text="Preparazione...")
 
             for idx, item in enumerate(bilanci_pronti):
                 nome = item["ragione_sociale"]
                 anno = item["anno"]
                 info = item["info"]
-                mode = info.get("mode", "text")
-                pagine_inviate = len(info.get("selected_pages", []))
-                totale_pagine = info.get("total_pages", 0)
 
                 if idx > 0:
                     time.sleep(5)  # pausa tra bilanci per evitare rate limit
 
                 progress.progress(
                     idx / totale,
-                    text=f"Analisi {idx+1}/{totale}: {nome} ({anno})..."
+                    text=f"Analisi {idx+1}/{totale}: {nome} ({anno})... può richiedere alcuni minuti"
                 )
 
                 # Testo supplementare per questo report
                 testo_suppl = ""
                 for fonte, testo in testi_supplementari.items():
-                    testo_suppl += f"\n\n--- {fonte} ---\n{testo[:5000]}"
+                    testo_suppl += f"\n\n--- DOCUMENTO SUPPLEMENTARE: {fonte} ---\n{testo[:8000]}"
 
-                nota_estrazione = (
-                    f"Il bilancio è scansionato — leggi i dati dalle immagini."
-                    if mode == "scanned" else
-                    f"Sono state selezionate {pagine_inviate} pagine rilevanti "
-                    f"su {totale_pagine} totali del bilancio completo."
-                )
+                stato = st.empty()
+                try:
+                    report = be.genera_report_bilancio(
+                        client, item["pdf_bytes"], info, nome, anno, lingua_prompt,
+                        testo_suppl=testo_suppl,
+                        fonti_supplementari=list(testi_supplementari.keys()),
+                        perimetro=perimetro_scelto,
+                        verifica=verifica_attiva,
+                        on_evento=lambda msg, stato=stato: stato.info(msg),
+                    )
 
-                prompt_testo = f"""Sei un analista M&A e finance di uno studio legale internazionale.
-Analizza il bilancio allegato di **{nome}** (esercizio {anno}) e, se presenti, i documenti supplementari.
-{nota_estrazione}
-Produci un report strutturato in JSON, con tutti i testi {lingua_prompt}.
-{testo_suppl}
+                    # Normalizza KPI a euro interi, calcola la leva e valida
+                    report = normalizza_kpi(report)
+                    be.completa_leva(report)
+                    report["_validation_warnings"] = valida_kpi(report) + be.controlli_fonti(report)
 
-Rispondi SOLO con un oggetto JSON valido, senza backtick, senza testo aggiuntivo.
+                    salva_report(nome, report, documenti_binari)
 
-═══════════════════════════════════════════════════════════════════
-STEP 0 — DETERMINA IL TIPO DI BILANCIO (CRITICO)
-═══════════════════════════════════════════════════════════════════
+                    st.session_state["reports_generati"].append({
+                        "nome": nome,
+                        "anno": anno,
+                        "report": report,
+                    })
+                    # Compatibilità con il codice esistente
+                    st.session_state["report"] = report
+                    generati += 1
 
-Prima di estrarre qualsiasi dato, identifica il TIPO di bilancio analizzando
-il documento. Popola il campo "tipo_bilancio" nelle note con UNO di questi valori:
-
-(A) "consolidato_ifrs" — Bilancio consolidato redatto secondo IAS/IFRS.
-    INDICATORI: presenza di "bilancio consolidato", "area di consolidamento",
-    "patrimonio netto di terzi", "interessenze di minoranza", riferimenti a
-    "IAS", "IFRS", voci come "Attività per diritti d'uso" / "Passività per
-    leasing" (IFRS 16), schema ESMA 32-382-1138 per la PFN, conto economico
-    complessivo, presenza di "Avviamento" con impairment test.
-
-(B) "esercizio_ifrs" — Bilancio d'esercizio (separato) di società quotata
-    che applica IFRS. INDICATORI: titolo "Bilancio d'esercizio" o "Bilancio
-    separato" + riferimenti a IAS/IFRS + presenza di passività per leasing
-    IFRS 16. Tipicamente capogruppo di gruppi quotati.
-
-(C) "esercizio_civilistico" — Bilancio d'esercizio secondo Codice Civile (OIC).
-    INDICATORI: stato patrimoniale con macroclassi A/B/C/D lato attivo e
-    A/B/C/D/E lato passivo (art. 2424 C.C.), conto economico ex art. 2425
-    C.C. con voci A, B, 20, 21, riferimenti a "OIC" / "principi contabili
-    nazionali", voce "D) Debiti" con sottovoci D.1 Obbligazioni, D.4 Debiti
-    verso banche, ecc. ASSENZA di "Passività per leasing" esposte separatamente.
-
-IMPORTANTE: le regole di estrazione variano in base al tipo di bilancio.
-Applica le regole corrette per il tipo identificato.
-
-═══════════════════════════════════════════════════════════════════
-STEP 1 — REGOLE DI ESTRAZIONE DATI FINANZIARI
-═══════════════════════════════════════════════════════════════════
-
-REGOLE GENERALI PER TUTTI I TIPI:
-- Tutti i valori in "dati_finanziari" e "struttura_debito" devono essere
-  NUMERI PURI (es. 1234567), mai stringhe.
-- Indica l'unità di misura usata nel bilancio nel campo "unita" (es.
-  "migliaia di euro", "milioni di euro", "euro").
-- Converti TUTTI i valori nella stessa unità dichiarata in "unita".
-- I valori negativi (perdite, PFN negativa quando cassa > debito) devono
-  avere il segno negativo (es. -5000).
-- Se un valore non è presente nel documento usa null, MAI 0 o "N/D".
-- Non inventare valori: meglio null che un numero sbagliato.
-- Se il bilancio contiene sia dati consolidati che separati, usa i CONSOLIDATI.
-
-CONTO ECONOMICO — regole per tipo:
-
-▶ Se "consolidato_ifrs" o "esercizio_ifrs":
-- "ricavi": "Ricavi delle vendite e delle prestazioni" (riga principale del CE).
-- "ebitda": "Margine operativo lordo" o "EBITDA" se esposto esplicitamente.
-  Se il bilancio espone solo "Ricorrente" e "Non ricorrente", usa il TOTALE
-  (reported), non solo il ricorrente.
-- "ebit": "Risultato operativo" o "EBIT".
-- "ammortamenti": somma di ammortamenti immateriali + materiali + diritti
-  d'uso (se IFRS 16) + eventuali svalutazioni.
-- "utile_netto": "Utile (perdita) di pertinenza del Gruppo" (riga finale
-  dopo le imposte e interessi di minoranza). Se consolidato, NON usare
-  "Utile di pertinenza di Terzi".
-
-▶ Se "esercizio_civilistico":
-- "ricavi": voce A.1 "Ricavi delle vendite e delle prestazioni".
-  NON usare "Valore della produzione" (voce A totale).
-- "ebit": "Differenza tra valore e costi della produzione" (A − B).
-- "ammortamenti": voce B.10 "Ammortamenti e svalutazioni" (somma B.10.a
-  + B.10.b + B.10.c + B.10.d).
-- "ebitda": NON è una voce del CE civilistico. CALCOLALO come:
-  EBITDA = (A − B) + B.10 + B.12 + B.13
-        = EBIT + Ammortamenti + Accantonamenti per rischi + Altri accantonamenti
-- "utile_netto": "Utile (perdita) dell'esercizio" — ultima riga del CE.
-
-STATO PATRIMONIALE — ATTIVO (tutti i tipi):
-- "totale_attivo": riga "Totale attivo" (sempre presente, valore finale).
-- "cassa":
-  ▶ IFRS: "Disponibilità liquide e mezzi equivalenti".
-  ▶ Civilistico: voce C.IV dell'attivo circolante "Disponibilità liquide".
-
-STATO PATRIMONIALE — PASSIVO (tutti i tipi):
-- "patrimonio_netto":
-  ▶ Consolidato IFRS: "Patrimonio netto del Gruppo e di Terzi" (totale
-    consolidato, incluse minoranze). Se chiedi quello del solo Gruppo
-    sottostimi il valore.
-  ▶ Esercizio IFRS / Civilistico: "Totale patrimonio netto" (voce A del
-    passivo in civilistico).
-
-═══════════════════════════════════════════════════════════════════
-STEP 2 — STRUTTURA DEL DEBITO (SEZIONE CRITICA, LEGGI ATTENTAMENTE)
-═══════════════════════════════════════════════════════════════════
-
-Questa sezione è la più soggetta a errori. Applica le regole per il tipo
-di bilancio identificato. Il CHECK CONTABILE deve sempre tornare:
-
-    indebitamento_totale >= debito_bancario + obbligazioni
-
-Se non torna, hai sbagliato a leggere indebitamento_totale.
-
-─────────────────────────────────────────────────────────
-CASO (C) ESERCIZIO CIVILISTICO — schema OIC / art. 2424 C.C.
-─────────────────────────────────────────────────────────
-
-- "indebitamento_totale": "TOTALE DEBITI" — voce D del Passivo (riga
-  riassuntiva di TUTTI i debiti). Include obbligazioni, debiti verso
-  banche, verso altri finanziatori, verso fornitori, tributari,
-  previdenziali, verso dipendenti, ecc. È un valore GRANDE (spesso
-  comparabile a circa metà del totale attivo).
-  ATTENZIONE: NON confondere con "totale debiti finanziari" (che è solo
-  bancario + obbligazioni).
-
-- "debito_bancario": voce D.4 "Debiti verso banche" (somma esigibili
-  entro + oltre l'esercizio).
-
-- "obbligazioni": somma voci D.1 "Obbligazioni" + D.2 "Obbligazioni
-  convertibili". Se non emette obbligazioni metti 0.
-
-- "debito_netto": "Posizione Finanziaria Netta" (PFN) o "Indebitamento
-  Finanziario Netto". Cerca nella Relazione sulla Gestione o nelle note.
-  Se non esposto, calcola: (D.1 + D.2 + D.3 finanziario + D.4 + D.5
-  finanziario) − C.IV Disponibilità liquide − C.III attività finanziarie
-  liquide.
-
-─────────────────────────────────────────────────────────
-CASO (A) CONSOLIDATO IFRS o (B) ESERCIZIO IFRS — schema ESMA
-─────────────────────────────────────────────────────────
-
-In IFRS NON esiste la "voce D" del passivo. Lo stato patrimoniale è
-organizzato per currenti/non correnti e le voci hanno nomi specifici.
-
-- "indebitamento_totale": **INDEBITAMENTO FINANZIARIO LORDO**, calcolato come:
-    Passività Finanziarie (non correnti + correnti) + Passività per Leasing
-    (non correnti + correnti)
-
-  Dove:
-  • "Passività finanziarie non correnti" = obbligazioni + finanziamenti
-    bancari MLT + finanziamenti istituzionali (BEI, CDP, ecc.) − eventuali
-    commissioni capitalizzate.
-  • "Debiti finanziari" (correnti) = scoperti c/c + quota corrente
-    finanziamenti MLT + altri debiti bancari BT.
-  • "Passività per leasing" = quote correnti + non correnti (IFRS 16).
-
-  ERRORE DA NON COMMETTERE: NON usare "Totale Passivo − Patrimonio Netto".
-  Questo include debiti commerciali, passività contrattuali, debiti tributari,
-  fondi, imposte differite — NON sono debito finanziario.
-
-- "debito_bancario": solo i finanziamenti bancari, ESCLUSO l'Eurobond e
-  ESCLUSE le passività per leasing. Include:
-  • Finanziamenti bancari MLT (quota non corrente)
-  • Finanziamenti BEI / CDP / SACE / istituzionali (quota non corrente)
-  • Quota corrente dei finanziamenti MLT
-  • Scoperti c/c e altri debiti bancari a breve
-  • Meno commissioni capitalizzate (se presenti)
-
-  ATTENZIONE DOUBLE COUNTING: se leggi il totale "Passività finanziarie"
-  che INCLUDE l'Eurobond, DEVI sottrarre l'Eurobond prima di popolare
-  questo campo. L'Eurobond va esclusivamente in "obbligazioni".
-
-- "obbligazioni": valore NOMINALE dell'Eurobond / prestito obbligazionario.
-  Tipicamente riportato nella nota "Passività finanziarie" sezione "Strumenti
-  di debito". Se la società non ha emesso bond metti 0.
-
-- "debito_netto": **Posizione Finanziaria Netta INCLUSIVA delle passività
-  per leasing** secondo schema ESMA 32-382-1138. È il valore ufficiale
-  pubblicato dalla società nella nota "Posizione Finanziaria Netta".
-  Formula: indebitamento_totale − Disponibilità liquide − Altre attività
-  finanziarie correnti liquide.
-
-  NOTA METODOLOGICA: alcune società espongono DUE valori di PFN (incl. e
-  escl. leasing). Per questo campo usa SEMPRE la versione INCL. leasing
-  (schema ESMA standard). Nel campo "note" della struttura debito, indica
-  anche il valore ESCL. leasing se dichiarato dalla società (utile per
-  covenant).
-
-- "leva_finanziaria": se la società dichiara ESPLICITAMENTE il proprio
-  "Leverage Ratio" ai fini dei covenant finanziari, usa QUEL valore e
-  cita la definizione nel campo "note". Altrimenti calcola:
-      leva = debito_netto / ebitda
-  Esempio per bilanci IFRS con covenant: tipicamente la società espone
-  "Indebitamento finanziario netto escl. leasing / EBITDA LTM normalizzato".
-  Se trovi questo valore (es. 1,63x), usalo e annota la definizione.
-
-═══════════════════════════════════════════════════════════════════
-STEP 3 — CHECK CONTABILI OBBLIGATORI prima di rispondere
-═══════════════════════════════════════════════════════════════════
-
-Esegui questi controlli e correggi se non tornano. Se dopo 2 tentativi
-ancora non tornano, annota il disallineamento nel campo "note" della
-struttura debito.
-
-1. indebitamento_totale >= debito_bancario + obbligazioni
-   Se fallisce:
-   ▶ Per civilistico: hai letto "totale debiti finanziari" invece della
-     voce D del Passivo. Cerca "TOTALE DEBITI" come riga riassuntiva D.
-   ▶ Per IFRS: hai escluso qualche componente (forse leasing). Ricontrolla
-     che indebitamento_totale includa passività finanziarie + passività
-     per leasing (correnti + non correnti).
-
-2. patrimonio_netto < totale_attivo (sempre, è un'identità contabile).
-
-3. ebitda ≈ ebit + ammortamenti (tolleranza 5%).
-   Se fallisce per civilistico, verifica di aver incluso anche B.12 e B.13
-   (accantonamenti) nel calcolo EBITDA.
-
-4. cassa < totale_attivo (sempre).
-
-5. Double-check Eurobond per IFRS: se "obbligazioni" > 0, verifica che
-   "debito_bancario" NON includa lo stesso ammontare (no double counting).
-
-6. Per IFRS: indebitamento_totale ≈ (debito_bancario + obbligazioni +
-   passività_per_leasing). Se leggi una discrepanza grossa, ci sono voci
-   residuali ("debiti per acquisizioni", "debiti v/altri finanziatori")
-   che vanno incluse in indebitamento_totale ma non in debito_bancario.
-
-═══════════════════════════════════════════════════════════════════
-SCHEMA JSON DI OUTPUT
-═══════════════════════════════════════════════════════════════════
-
-{{
-  "nome_azienda": "{nome}",
-  "overview": "",
-  "core_business": "",
-  "mercati": "",
-  "dati_finanziari": {{
-    "unita": "migliaia di euro",
-    "ricavi": null,
-    "ebitda": null,
-    "ebit": null,
-    "utile_netto": null,
-    "ammortamenti": null,
-    "totale_attivo": null,
-    "patrimonio_netto": null,
-    "cassa": null,
-    "anno_riferimento": "{anno}"
-  }},
-  "struttura_debito": {{
-    "indebitamento_totale": null,
-    "debito_bancario": null,
-    "obbligazioni": null,
-    "debito_netto": null,
-    "leva_finanziaria": null,
-    "scadenze_principali": "",
-    "note": ""
-  }},
-  "ownership": {{
-    "azionista_principale": "",
-    "quota_principale": "",
-    "altri_azionisti": "",
-    "struttura_controllo": "",
-    "note": ""
-  }},
-  "operazioni_ma": [
-    {{"anno": "", "tipo": "", "descrizione": ""}}
-  ],
-  "note_aggiuntive": ""
-}}
-
-═══════════════════════════════════════════════════════════════════
-ISTRUZIONI PER IL CAMPO "note" DELLA STRUTTURA DEBITO
-═══════════════════════════════════════════════════════════════════
-
-Nel campo "note" di struttura_debito, includi SEMPRE queste informazioni
-quando applicabili, separate da " | ":
-
-1. Tipo di bilancio identificato: es. "tipo_bilancio: consolidato_ifrs"
-2. Metodologia PFN: es. "PFN incl. leasing (schema ESMA)" oppure
-   "PFN escl. leasing" oppure "PFN ricostruita (non esposta dalla società)"
-3. Se disponibile, PFN alternativa: es. "PFN escl. leasing: 961.805
-   (rilevante per covenant)"
-4. Se applicabile, definizione leva ufficiale: es. "Leverage covenant
-   dichiarato: 1,63x (PFN escl. leasing / EBITDA normalizzato)"
-5. Eventuali discrepanze nei check contabili.
-
-═══════════════════════════════════════════════════════════════════
-ISTRUZIONI PER IL CAMPO "scadenze_principali"
-═══════════════════════════════════════════════════════════════════
-
-Riporta il profilo di scadenza del debito bancario e obbligazionario
-(esclusi leasing) in formato sintetico, es.:
-"2025: €131,9M | 2026: €245,4M | 2027: €430,4M (di cui Eurobond €350M) |
-2028: €80,7M | 2029-2033: €238,1M"
-
-Se non disponibile, scrivi "N/D".
-
-═══════════════════════════════════════════════════════════════════
-
-Se un testo qualitativo (overview, core_business, ecc.) non è disponibile
-scrivi "N/D". Per i numeri usa sempre null come indicato sopra.
-"""
-
-                for tentativo in range(3):
-                    try:
-                        messaggio = client.messages.create(
-                            model="claude-sonnet-4-6",
-                            max_tokens=6000,
-                            messages=[{"role": "user", "content": [
-                                {
-                                    "type": "document",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "application/pdf",
-                                        "data": item["pdf_b64"],
-                                    }
-                                },
-                                {"type": "text", "text": prompt_testo}
-                            ]}]
-                        )
-                        risposta = messaggio.content[0].text.strip()
-                        if risposta.startswith("```"):
-                            risposta = risposta.split("```")[1]
-                            if risposta.startswith("json"):
-                                risposta = risposta[4:]
-                        report = json.loads(risposta.strip())
-
-                        # Normalizza KPI a euro interi e valida
-                        report = normalizza_kpi(report)
-                        kpi_warnings = valida_kpi(report)
-                        report["_validation_warnings"] = kpi_warnings
-
-                        salva_report(nome, report, documenti_binari)
-
-                        # Salva in session_state (lista per multi-report)
-                        if "reports_generati" not in st.session_state:
-                            st.session_state["reports_generati"] = []
-                        st.session_state["reports_generati"].append({
-                            "nome": nome,
-                            "anno": anno,
-                            "report": report,
-                        })
-                        # Compatibilità con il codice esistente
-                        st.session_state["report"] = report
-                        break
-
-                    except Exception as e:
-                        if tentativo < 2:
-                            st.warning(f"{nome}: tentativo {tentativo+1} fallito, riprovo...")
-                            time.sleep(30)
-                        else:
-                            st.error(f"❌ Errore per {nome}: {e}")
+                except be.ErroreEstrazione as e:
+                    st.error(f"❌ {nome}: {e}")
+                except Exception as e:
+                    st.error(f"❌ Errore per {nome}: {type(e).__name__}: {e}")
+                finally:
+                    stato.empty()
 
             progress.progress(1.0, text="Completato!")
-            st.success(f"✅ {len(bilanci_pronti)} report generati e salvati!")
+            if generati:
+                st.success(f"✅ {generati} report su {totale} generati e salvati!")
 
-            # ── Pulsanti export ───────────────────────────────────────────────
-            reports_list = [
-                item["report"]
-                for item in st.session_state.get("reports_generati", [])
-                if item.get("report")
-            ]
-            if reports_list:
-                nome_file = reports_list[0].get("nome_azienda", "report").replace(" ", "_")
-                data_oggi_str = datetime.now().strftime("%Y%m%d")
-
-                col_xl, col_wd = st.columns(2)
-
-                with col_xl:
-                    try:
-                        excel_bytes = genera_excel(reports_list)
-                        st.download_button(
-                            label="📥 Scarica Excel",
-                            data=excel_bytes,
-                            file_name=f"TaxiReport_{nome_file}_{data_oggi_str}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                        )
-                    except Exception as e:
-                        st.error(f"Errore Excel: {e}")
-
-                with col_wd:
-                    try:
-                        word_bytes = genera_word(reports_list)
-                        st.download_button(
-                            label="📄 Scarica Word",
-                            data=word_bytes,
-                            file_name=f"TaxiReport_{nome_file}_{data_oggi_str}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            use_container_width=True,
-                        )
-                    except Exception as e:
-                        st.error(f"Errore Word: {e}")
-
-        # ── Caso B: solo documenti supplementari (comportamento originale) ────
+        # ── Caso B: solo documenti supplementari ──────────────────────────────
         else:
-            nome_azienda = st.text_input(
-                "Nome dell'azienda", placeholder="es. Eco Eridania S.p.A.",
-                key="nome_solo_suppl"
-            )
+            nome_azienda = nome_solo_suppl.strip()
             if not nome_azienda:
                 st.warning("Inserisci il nome dell'azienda.")
             else:
@@ -1872,20 +1647,16 @@ Rispondi SOLO con un oggetto JSON valido:
   "note_aggiuntive": ""
 }}
 
-Se un dato non è disponibile scrivi N/D. Non inventare dati."""
+Usa SOLO informazioni scritte nei documenti qui sopra: nessuna conoscenza esterna,
+nessuna supposizione. Riporta denominazioni, quote, date e forme di amministrazione
+come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati."""
 
                     try:
-                        messaggio = client.messages.create(
-                            model="claude-haiku-4-5-20251001",
-                            max_tokens=4000,
-                            messages=[{"role": "user", "content": prompt2}]
+                        risposta, _modello, _uso = be.chiama_claude(
+                            client, [{"type": "text", "text": prompt2}], 8000,
+                            modelli=be.MODELLI_VELOCI,
                         )
-                        risposta = messaggio.content[0].text.strip()
-                        if risposta.startswith("```"):
-                            risposta = risposta.split("```")[1]
-                            if risposta.startswith("json"):
-                                risposta = risposta[4:]
-                        report = json.loads(risposta.strip())
+                        report = be.estrai_json(risposta)
                         salva_report(nome_azienda, report, documenti_binari)
                         st.session_state["reports_generati"] = [{
                             "nome": nome_azienda,
@@ -1911,6 +1682,7 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
             # Pannello validazione
             kpi_warnings = report.get("_validation_warnings", [])
             render_pannello_validazione(kpi_warnings)
+            render_fonti_verifica(report)
 
             # Calcolo margine EBITDA
             r_val = fin.get("ricavi")
@@ -1950,7 +1722,7 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                         <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{fmt_kpi(report,'debito_bancario','struttura_debito')}</div></div>
                         <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{fmt_kpi(report,'obbligazioni','struttura_debito')}</div></div>
                         <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{fmt_kpi(report,'debito_netto','struttura_debito')}</div></div>
-                        <div class="kpi-card"><div class="kpi-label">Leva Finanziaria</div><div class="kpi-value">{debito.get('leva_finanziaria','N/D')}</div></div>
+                        <div class="kpi-card"><div class="kpi-label">Leva (PFN/EBITDA)</div><div class="kpi-value">{fmt_leva(debito)}</div></div>
                     </div>
                     """, unsafe_allow_html=True)
                     if debito.get('scadenze_principali', 'N/D') != 'N/D':
@@ -1987,6 +1759,7 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                             <span class="ma-anno">{op.get('anno','')}</span>
                             <div class="ma-tipo">{op.get('tipo','')}</div>
                             <div class="ma-desc">{op.get('descrizione','')}</div>
+                            {('<div class="ma-tipo">Fonte: ' + html.escape(str(op.get('fonte'))) + '</div>') if op.get('fonte') else ''}
                         </div>""", unsafe_allow_html=True)
                 else:
                     st.write("Nessuna operazione rilevata.")
@@ -2060,6 +1833,7 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
         # Pannello validazione
         kpi_warnings = report.get("_validation_warnings") or valida_kpi(report)
         render_pannello_validazione(kpi_warnings)
+        render_fonti_verifica(report)
 
         # Margine EBITDA
         r_val = fin.get("ricavi")
@@ -2098,7 +1872,7 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                     <div class="kpi-card"><div class="kpi-label">Debito Bancario</div><div class="kpi-value">{fmt_kpi(report,'debito_bancario','struttura_debito')}</div></div>
                     <div class="kpi-card"><div class="kpi-label">Obbligazioni</div><div class="kpi-value">{fmt_kpi(report,'obbligazioni','struttura_debito')}</div></div>
                     <div class="kpi-card"><div class="kpi-label">Debito Netto</div><div class="kpi-value">{fmt_kpi(report,'debito_netto','struttura_debito')}</div></div>
-                    <div class="kpi-card"><div class="kpi-label">Leva Finanziaria</div><div class="kpi-value">{debito.get('leva_finanziaria','N/D')}</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Leva (PFN/EBITDA)</div><div class="kpi-value">{fmt_leva(debito)}</div></div>
                 </div>
                 """, unsafe_allow_html=True)
                 if debito.get('scadenze_principali', 'N/D') not in ('N/D', '', None):
@@ -2135,6 +1909,7 @@ Se un dato non è disponibile scrivi N/D. Non inventare dati."""
                         <span class="ma-anno">{op.get('anno','')}</span>
                         <div class="ma-tipo">{op.get('tipo','')}</div>
                         <div class="ma-desc">{op.get('descrizione','')}</div>
+                            {('<div class="ma-tipo">Fonte: ' + html.escape(str(op.get('fonte'))) + '</div>') if op.get('fonte') else ''}
                     </div>""", unsafe_allow_html=True)
             else:
                 st.write("Nessuna operazione rilevata.")
@@ -2631,17 +2406,10 @@ If you find sections with different names, use those names exactly."""
                 with st.spinner("Claude sta analizzando il documento..."):
                     for tentativo in range(3):
                         try:
-                            messaggio = client.messages.create(
-                                model="claude-sonnet-4-6",
-                                max_tokens=16000,
-                                messages=[{"role": "user", "content": prompt_estrazione}]
+                            risposta, _modello, _uso = be.chiama_claude(
+                                client, [{"type": "text", "text": prompt_estrazione}], 32000
                             )
-                            risposta = messaggio.content[0].text.strip()
-                            if risposta.startswith("```"):
-                                risposta = risposta.split("```")[1]
-                                if risposta.startswith("json"):
-                                    risposta = risposta[4:]
-                            report = json.loads(risposta.strip())
+                            report = be.estrai_json(risposta)
 
                             nome_azienda = report.get("nome_azienda", docx_file.name)
                             st.session_state["report_caricato"] = report
@@ -2650,7 +2418,7 @@ If you find sections with different names, use those names exactly."""
                             st.success("✅ Estrazione completata!")
                             break
 
-                        except json.JSONDecodeError as e:
+                        except (json.JSONDecodeError, be.ErroreEstrazione) as e:
                             if tentativo < 2:
                                 st.warning(f"Tentativo {tentativo+1}: risposta non valida, riprovo...")
                                 time.sleep(5)
