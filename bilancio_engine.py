@@ -185,6 +185,12 @@ CATEGORIE = {
         ("totale debiti", 8), ("patrimonio netto", 3),
         ("statement of financial position", 6), ("income statement", 6),
         ("total assets", 12), ("total equity and liabilities", 12),
+        ("total liabilities and equity", 12), ("statement of cash flows", 6),
+        ("cash flow statement", 6), ("statement of changes in equity", 4),
+        ("operating profit", 5), ("operating result", 5),
+        ("profit (loss) for the year", 6), ("core business revenue", 5),
+        ("total revenue", 5), ("cash and cash equivalents", 4), ("net cash flows", 5),
+        ("total equity", 4),
     ],
     "pfn": [
         ("posizione finanziaria netta", 12), ("indebitamento finanziario netto", 12),
@@ -193,6 +199,9 @@ CATEGORIE = {
         ("margine operativo lordo", 5), ("leverage", 5), ("covenant", 4),
         ("indicatori alternativi di performance", 6), ("dati di sintesi", 4),
         ("principali indicatori", 4), ("highlights", 3),
+        ("net financial debt", 12), ("gross operating margin", 8), ("net debt", 6),
+        ("free cash flow", 5), ("alternative performance", 6), ("credit rating", 8), ("rating agency", 6),
+        ("key figures", 4),
     ],
     "debito": [
         ("debiti verso banche", 10), ("passività finanziarie", 9),
@@ -203,6 +212,10 @@ CATEGORIE = {
         ("oltre cinque anni", 5), ("mutui", 4), ("linee di credito", 5),
         ("revolving", 5), ("passività per leasing", 6), ("tasso di interesse", 3),
         ("garanzie", 2), ("pegno", 3),
+        ("financial liabilities", 9), ("bank loans", 8), ("borrowings", 5), ("bonds", 5),
+        ("convertible bond", 7), ("maturit", 4), ("revolving credit", 7),
+        ("credit lines", 5), ("lease liabilities", 5), ("interest rate", 3),
+        ("notional", 3), ("future contractual payments", 6), ("liquidity risk", 5),
     ],
     "ownership": [
         ("compagine sociale", 10), ("azionist", 6), ("capitale sociale", 5),
@@ -210,6 +223,11 @@ CATEGORIE = {
         ("detenut", 3), ("soci ", 3), ("partecipazione di maggioranza", 6),
         ("patto parasociale", 6), ("azioni proprie", 3),
         ("consiglio di amministrazione", 3), ("organi sociali", 4),
+        ("shareholders' agreement", 9), ("jointly control", 9),
+        ("shareholding structure", 8), ("ownership structure", 8),
+        ("major shareholders", 8), ("parent company", 5), ("share capital", 5),
+        ("% owned", 3), ("treasury shares", 4), ("controlled by", 5),
+        ("related party transactions", 5), ("other shareholders", 7),
     ],
     "ma": [
         ("acquisizion", 6), ("cession", 4), ("fusione", 6), ("scissione", 5),
@@ -218,6 +236,11 @@ CATEGORIE = {
         ("dopo la chiusura dell'esercizio", 7), ("area di consolidamento", 6),
         ("perimetro di consolidamento", 6), ("closing", 4), ("signing", 4),
         ("opa ", 5), ("offerta pubblica", 6), ("conferimento", 4),
+        ("acquisition", 5), ("merger", 6), ("disposal", 4), ("divestment", 5),
+        ("sale of equity interest", 9), ("assets held for sale", 8),
+        ("discontinued operations", 5), ("consolidation scope", 7),
+        ("scope of consolidation", 7), ("subsequent events", 7), ("events after", 6),
+        ("memorandum of understanding", 5), ("sold to", 4),
     ],
     "overview": [
         ("relazione sulla gestione", 8), ("attività del gruppo", 7),
@@ -226,6 +249,10 @@ CATEGORIE = {
         ("profilo del gruppo", 8), ("chi siamo", 6), ("modello di business", 7),
         ("aree geografiche", 5), ("stabiliment", 3), ("dipendenti", 2),
         ("evoluzione prevedibile", 4), ("lettera agli azionisti", 4),
+        ("letter to the shareholders", 9), ("business model", 7),
+        ("reporting segments", 7), ("backlog", 5), ("geographic area", 9),
+        ("by geographical", 5), ("market context", 5), ("new contracts", 5),
+        ("business line", 4), ("employees", 2),
     ],
 }
 
@@ -244,7 +271,7 @@ TITOLI_PROSPETTI = (
     "stato patrimoniale", "situazione patrimoniale", "conto economico",
     "rendiconto finanziario", "prospetto delle variazioni",
     "statement of financial position", "income statement", "cash flow statement",
-    "balance sheet",
+    "balance sheet", "statement of cash flows", "statement of changes in equity",
 )
 
 
@@ -276,19 +303,45 @@ def _punteggi_pagina(testo_norm: str) -> dict:
     return punti
 
 
-def _perimetro_pagine(testi_norm: list) -> list:
+_ES_MINUSCOLO = ("bilancio d'esercizio", "bilancio di esercizio", "bilancio separato",
+                 "bilancio civilistico", "statutory financial statements",
+                 "separate financial statements")
+_CONS_MAIUSCOLO = ("CONSOLIDATED", "CONSOLIDATO")
+_ES_MAIUSCOLO = ("STATUTORY", "SEPARATE FINANCIAL", "BILANCIO D'ESERCIZIO",
+                 "BILANCIO DI ESERCIZIO", "BILANCIO SEPARATO")
+
+
+def _perimetro_pagine(testi_norm: list, testi_originali: list = None) -> list:
     """
     Per ogni pagina: "consolidato", "esercizio" o None, in base alle intestazioni
     e ai piè di pagina. L'ultima indicazione vista vale fino alla successiva.
+
+    Molte relazioni annuali hanno in testa a ogni pagina una barra di navigazione
+    con i nomi di tutte le sezioni, dove quella corrente è in MAIUSCOLO: in quel
+    caso conta solo il maiuscolo.
     """
     esito = []
     corrente = None
-    for t in testi_norm:
+    for i, t in enumerate(testi_norm):
         bordi = t[:220] + " " + t[-220:]
-        if "consolidat" in bordi:
+        testa = (testi_originali[i][:260] if testi_originali else "").replace("’", "'")
+        cons_maiuscolo = any(k in testa for k in _CONS_MAIUSCOLO)
+        es_maiuscolo = any(k in testa for k in _ES_MAIUSCOLO)
+        cons = "consolidat" in bordi
+        es = any(k in bordi for k in _ES_MINUSCOLO) or "statutory" in bordi
+
+        if cons_maiuscolo != es_maiuscolo:
+            corrente = "consolidato" if cons_maiuscolo else "esercizio"
+        elif cons_maiuscolo and es_maiuscolo:
+            pass                                  # ambiguo: resta l'ultima indicazione
+        elif cons and es:
+            # Barra di navigazione senza maiuscolo sulle sezioni di bilancio:
+            # la pagina sta in un'altra sezione (es. relazione sulla gestione).
+            if testi_originali:
+                corrente = None
+        elif cons:
             corrente = "consolidato"
-        elif ("bilancio d'esercizio" in bordi or "bilancio di esercizio" in bordi
-              or "bilancio separato" in bordi or "bilancio civilistico" in bordi):
+        elif es:
             corrente = "esercizio"
         esito.append(corrente)
     return esito
@@ -452,7 +505,7 @@ def analizza_pdf(pdf_bytes: bytes, perimetro: str = "auto", pagine_max: int = PA
 
     # ── c) documento con testo: punteggio per categorie ──────────────────────
     punteggi = [_punteggi_pagina(t) for t in testi_norm]
-    perimetri = _perimetro_pagine(testi_norm)
+    perimetri = _perimetro_pagine(testi_norm, [p["testo"] for p in pagine])
     info["ha_consolidato"] = perimetri.count("consolidato") >= 3
     info["ha_esercizio"] = perimetri.count("esercizio") >= 3
 
@@ -468,6 +521,17 @@ def analizza_pdf(pdf_bytes: bytes, perimetro: str = "auto", pagine_max: int = PA
             fattore = 1.5 if per == voluto else 0.25
             for cat in ("prospetti", "pfn", "debito"):
                 punteggi[i][cat] = int(punteggi[i][cat] * fattore)
+
+    # Continuità: una tabella o una nota prosegue spesso sulla pagina successiva,
+    # che da sola avrebbe poche parole chiave ("segue", senza titolo).
+    base = [dict(p) for p in punteggi]
+    for i in range(totale - 1):
+        if scansionate[i + 1]:
+            continue
+        for cat in ("pfn", "debito", "ownership", "ma", "overview"):
+            eredita = base[i][cat] // 2
+            if eredita >= SOGLIA_CATEGORIA[cat] and eredita > punteggi[i + 1][cat]:
+                punteggi[i + 1][cat] = eredita
 
     info["page_scores"] = [max(p[c] for c in ORDINE_PRIORITA) for p in punteggi]
     info["page_categories"] = [
@@ -793,6 +857,26 @@ REGOLE DI METODO (valgono per tutto il report)
 7. CATENE DI CONTROLLO. Distingui partecipazioni dirette e indirette e
    non invertire la direzione del controllo (chi controlla chi).
 
+8. PAGINE CITATE NEI TESTI. Quando in un campo di testo citi una pagina del
+   bilancio, scrivi SOLO il marcatore [p.N], dove N è il numero d'ordine
+   della pagina nell'allegato (da 1 a {n_pagine}). Il programma lo converte
+   nel numero di pagina del PDF originale. Non scrivere "dell'allegato" né
+   il numero stampato sulla pagina.
+
+9. NIENTE COMMENTI SUL MATERIALE NEI TESTI. Nei campi overview,
+   core_business, mercati, ownership e operazioni_ma non scrivere frasi
+   come "il testo si interrompe", "la visura è troncata", "pagina non
+   inclusa": riporta ciò che i documenti dicono. Le lacune del materiale
+   vanno solo in "dati_non_trovati" o, in una riga, in "note_aggiuntive".
+
+10. DOCUMENTI SUPPLEMENTARI. La visura è già ridotta alle sezioni utili e
+    l'export Mergermarket elenca tutte le operazioni: leggili per intero.
+    Per ogni operazione Mergermarket riporta date di annuncio e di
+    completamento, controparti, corrispettivo e, se l'operazione non è
+    completata, l'ULTIMO aggiornamento disponibile (le descrizioni sono in
+    ordine cronologico: l'ultima notizia è in fondo). Se due notizie della
+    stessa fonte si contraddicono, segnalalo invece di sceglierne una.
+
 ═══════════════════════════════════════════════════════════════════
 STEP 0 — DETERMINA IL TIPO DI BILANCIO (CRITICO)
 ═══════════════════════════════════════════════════════════════════
@@ -1034,11 +1118,18 @@ obbligazionario (esclusi leasing) in formato sintetico, es.:
 Se non disponibile nelle pagine fornite, scrivi "N/D".
 
 "ownership" — usa SOLO soci e quote scritti nei documenti (bilancio o
-visura). Se c'è la visura, per soci e organi sociali prevale la visura.
+visura). Per gli organi sociali prevale la visura. Le società quotate non
+hanno elenco soci in visura: cerca le quote nel bilancio (tabella dell'area
+di consolidamento, relazione sul governo societario, nota sulle parti
+correlate) e riporta in "struttura_controllo" patti parasociali e natura
+del controllo (solitario, congiunto, nessuno).
 
 "operazioni_ma" — SOLO operazioni descritte nei documenti forniti. Per
-ognuna compila "fonte": "Bilancio, p. N dell'allegato" oppure il nome del
-documento supplementare (es. "Mergermarket"). NON attribuire nulla a
+ognuna compila "fonte": "Bilancio [p.N]" oppure il nome del documento
+supplementare (es. "Mergermarket"). Riporta tutte le operazioni degli
+ultimi 5 esercizi presenti nei documenti; per quelle più vecchie basta una
+riga riassuntiva finale. Incrocia bilancio e Mergermarket: un'operazione
+descritta in entrambi va riportata una sola volta, con entrambe le fonti. NON attribuire nulla a
 Mergermarket se l'export Mergermarket non è tra i documenti forniti. Se
 non risultano operazioni, restituisci una lista vuota [].
 
@@ -1135,6 +1226,11 @@ def _numero(v):
         return None
 
 
+def _it(n: float) -> str:
+    """Numero con il punto come separatore delle migliaia."""
+    return f"{n:,.0f}".replace(",", ".")
+
+
 def _sezione_di(campo: str) -> str:
     if campo in KPI_FINANZIARI:
         return "dati_finanziari"
@@ -1225,15 +1321,15 @@ def completa_calcoli(report: dict) -> list:
         if esistente is None or civilistico:
             if esistente is not None and abs(esistente - calcolato) > 0.01 * max(abs(calcolato), 1):
                 note.append(
-                    f"EBITDA indicato dal modello ({esistente:,.0f}) sostituito con il valore "
-                    f"ricalcolato dai componenti del conto economico ({calcolato:,.0f})."
+                    f"EBITDA indicato dal modello ({_it(esistente)}) sostituito con il valore "
+                    f"ricalcolato dai componenti del conto economico ({_it(calcolato)})."
                 )
             fin["ebitda"] = calcolato
             report.setdefault("fonti", {})["ebitda"] = {
                 "p": (report.get("fonti", {}).get("ebit") or {}).get("p"),
                 "voce": "EBITDA calcolato: (A − B) + B.10 + B.12 + B.13",
                 "letto": "",
-                "calcolo": f"{a_b:,.0f} + {b10:,.0f} + {b12:,.0f} + {b13:,.0f}",
+                "calcolo": f"{_it(a_b)} + {_it(b10)} + {_it(b12)} + {_it(b13)}",
             }
             report["ebitda_metodo"] = "calcolato"
             if _numero(fin.get("ebit")) is None:
@@ -1248,8 +1344,8 @@ def completa_calcoli(report: dict) -> list:
     if (report.get("ebitda_metodo") == "calcolato" and dichiarato is not None and usato is not None
             and abs(dichiarato - usato) > 0.01 * max(abs(usato), 1)):
         note.append(
-            f"La relazione sulla gestione dichiara un EBITDA/MOL di {dichiarato:,.0f}, diverso da "
-            f"quello calcolato dal conto economico ({usato:,.0f}) usato nel report (unità del bilancio)."
+            f"La relazione sulla gestione dichiara un EBITDA/MOL di {_it(dichiarato)}, diverso da "
+            f"quello calcolato dal conto economico ({_it(usato)}) usato nel report (unità del bilancio)."
         )
     return note
 
@@ -1465,6 +1561,7 @@ def genera_report_bilancio(client, pdf_ridotto: bytes, info: dict, nome: str, an
 
     note_calcolo = completa_calcoli(report)
     rimappa_fonti(report, pagine_originali)
+    converti_riferimenti_pagina(report, pagine_originali, inglese="ingles" in lingua_prompt)
 
     report["_verifica"] = registro
     report["_note_calcolo"] = note_calcolo
@@ -1483,3 +1580,259 @@ def testo_da_modello_veloce(client, content: list, max_tokens: int = 8000) -> st
     """Chiamata breve (es. lettura della visura) con il modello veloce."""
     testo, _modello, _uso = chiama_claude(client, content, max_tokens, modelli=MODELLI_VELOCI)
     return testo
+
+
+# ── 7. Documenti supplementari: visura e Mergermarket ────────────────────────
+
+LIMITI_SUPPLEMENTARI = {"Visura Camerale": 30000, "Mergermarket": 45000}
+LIMITE_SUPPLEMENTARE_DEFAULT = 8000
+
+_RE_RIGA_SEZIONE = re.compile(r"^\s*(\d{1,2})\s+([A-Za-zÀ-ú][^\d]{2,80})$")
+_RUMORE_VISURA = (
+    "registro imprese", "archivio ufficiale della cciaa", "documento n .",
+    "estratto dal registro imprese in data", "visura ordinaria", "codice fiscale 0",
+    "servizio realizzato da infocamere", "camera di commercio di",
+)
+# Caratteri riservati a ogni sezione della visura (il resto, soprattutto le
+# decine di pagine di procure, viene tagliato).
+_QUOTE_VISURA = [
+    ("sede", 1500), ("statuto", 6000), ("capitale", 2500), ("soci", 9000),
+    ("amministratori", 4500), ("sindaci", 3000), ("titolari di altre cariche", 300),
+    ("trasferimenti", 5000), ("attivit", 2500), ("sedi secondarie", 600),
+    ("aggiornamento", 500),
+]
+
+
+def leggi_visura(pdf_bytes: bytes, max_caratteri: int = 30000) -> str:
+    """
+    Riduce una visura camerale (anche di centinaia di pagine) alle parti utili:
+    riepilogo iniziale, sede, statuto, capitale, soci e patti parasociali,
+    amministratori, sindaci, operazioni straordinarie, attività.
+    Restituisce "" se il PDF non ha testo (visura scansionata).
+    """
+    pagine = leggi_pagine(pdf_bytes)
+    if not pagine or sum(p["caratteri"] for p in pagine) < 300 * len(pagine) * 0.3:
+        return ""
+
+    data_estrazione = ""
+    righe = []
+    for p in pagine:
+        for riga in p["testo"].replace("\r", "\n").split("\n"):
+            pulita = riga.strip()
+            if not pulita:
+                continue
+            bassa = pulita.lower()
+            if not data_estrazione:
+                m = re.search(r"estratto dal registro imprese in data (\d{2}/\d{2}/\d{4})", bassa)
+                if m:
+                    data_estrazione = m.group(1)
+            if any(bassa.startswith(r) for r in _RUMORE_VISURA) or re.fullmatch(r"[.\s\d•]+", pulita) \
+                    or re.fullmatch(r"\.{5,}\s*\d*", pulita) or bassa.startswith("visura ") \
+                    or re.fullmatch(r"\d+", pulita):
+                continue
+            righe.append(pulita)
+
+    # Indice: sequenza 1, 2, 3... dopo la riga "Indice"
+    titoli, fine_indice = [], 0
+    for i, riga in enumerate(righe[:400]):
+        if riga.lower() == "indice":
+            atteso = 1
+            for j in range(i + 1, min(i + 40, len(righe))):
+                m = _RE_RIGA_SEZIONE.match(righe[j])
+                if m and int(m.group(1)) == atteso:
+                    titoli.append((atteso, m.group(2).strip()))
+                    atteso += 1
+                    fine_indice = j + 1
+                elif titoli:
+                    break
+            break
+
+    if len(titoli) < 3:
+        # Struttura non riconosciuta: inizio del documento più i passaggi sui soci.
+        testo = "\n".join(righe)
+        return testo[:max_caratteri]
+
+    inizi = []
+    cursore = fine_indice
+    for numero, titolo in titoli:
+        chiave = f"{numero} {titolo}".lower()
+        for j in range(cursore, len(righe)):
+            if righe[j].lower() == chiave:
+                inizi.append((titolo, j))
+                cursore = j + 1
+                break
+
+    blocchi = []
+    intestazione = "\n".join(righe[:fine_indice - len(titoli) - 1])[:3000]
+    blocchi.append("RIEPILOGO\n" + intestazione)
+    for k, (titolo, inizio) in enumerate(inizi):
+        fine = inizi[k + 1][1] if k + 1 < len(inizi) else len(righe)
+        corpo = "\n".join(righe[inizio + 1:fine])
+        quota = 2000
+        for parola, q in _QUOTE_VISURA:
+            if parola in titolo.lower():
+                quota = q
+                break
+        if len(corpo) > quota:
+            corpo = corpo[:quota] + f"\n[... sezione abbreviata: omessi {len(corpo) - quota} caratteri]"
+        blocchi.append(f"SEZIONE {titolo.upper()}\n{corpo}")
+
+    testa = f"Visura camerale estratta dal Registro Imprese il {data_estrazione}.\n" if data_estrazione else ""
+    return (testa + "\n\n".join(blocchi))[:max_caratteri]
+
+
+def _righe_tabella(nome_file: str, contenuto: bytes) -> list:
+    """Righe (liste di celle) di un file .xlsx o .csv."""
+    nome = nome_file.lower()
+    if nome.endswith((".xlsx", ".xlsm")):
+        import warnings
+        import openpyxl
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wb = openpyxl.load_workbook(io.BytesIO(contenuto), data_only=True, read_only=True)
+        righe = []
+        for ws in wb.worksheets:
+            for riga in ws.iter_rows(values_only=True):
+                righe.append(list(riga))
+        wb.close()
+        return righe
+    import csv
+    testo = contenuto.decode("utf-8-sig", errors="replace")
+    try:
+        dialetto = csv.Sniffer().sniff(testo[:4000], delimiters=",;\t")
+    except csv.Error:
+        dialetto = csv.excel
+    return [riga for riga in csv.reader(io.StringIO(testo), dialetto)]
+
+
+def _cella(v) -> str:
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%d/%m/%Y")
+    if isinstance(v, float):
+        return f"{v:,.2f}".rstrip("0").rstrip(".")
+    return str(v).strip()
+
+
+def leggi_mergermarket(nome_file: str, contenuto: bytes, max_caratteri: int = 45000) -> str:
+    """
+    Trasforma l'export Mergermarket (.xlsx, .csv o .pdf) in un elenco di
+    operazioni leggibile. Tutte le operazioni vengono elencate; se il testo
+    supera il limite, le descrizioni delle operazioni più vecchie sono abbreviate.
+    """
+    if nome_file.lower().endswith(".pdf"):
+        testo = "\n".join(p["testo"] for p in leggi_pagine(contenuto))
+        return testo[:max_caratteri]
+
+    righe = _righe_tabella(nome_file, contenuto)
+    indice_intestazione = None
+    for i, riga in enumerate(righe):
+        celle = [_cella(c).lower() for c in riga]
+        if "target" in celle and any("announced" in c for c in celle):
+            indice_intestazione = i
+            break
+    if indice_intestazione is None:
+        testo = "\n".join(" | ".join(_cella(c) for c in riga if _cella(c)) for riga in righe)
+        return testo[:max_caratteri]
+
+    intestazione = [_cella(c) for c in righe[indice_intestazione]]
+    col = {nome.lower(): k for k, nome in enumerate(intestazione) if nome}
+
+    def campo(riga, *nomi):
+        for nome in nomi:
+            k = col.get(nome)
+            if k is not None and k < len(riga):
+                valore = _cella(riga[k])
+                if valore:
+                    return valore
+        return ""
+
+    operazioni = []
+    for riga in righe[indice_intestazione + 1:]:
+        target = campo(riga, "target")
+        if not target:
+            continue
+        testa = (
+            f"Annunciata: {campo(riga, 'announced') or 'n.d.'} | "
+            f"Completata: {campo(riga, 'completed') or 'non risulta completata'} | "
+            f"Target: {target} | Acquirente: {campo(riga, 'acquirer', 'bidder') or 'n.d.'} | "
+            f"Venditore: {campo(riga, 'divestor', 'seller', 'vendor') or 'n.d.'}"
+        )
+        valore = campo(riga, "deal value $m", "deal value usd(m)", "deal value")
+        if valore:
+            testa += f" | Valore ($m): {valore}"
+        operazioni.append((testa, campo(riga, "deal description", "description")))
+
+    quota_descrizioni = max_caratteri - sum(len(t) + 60 for t, _ in operazioni) - 300
+    blocchi = []
+    for n, (testa, descrizione) in enumerate(operazioni, start=1):
+        if descrizione and quota_descrizioni > 0:
+            if len(descrizione) > quota_descrizioni:
+                descrizione = descrizione[:max(quota_descrizioni, 0)] + " [descrizione abbreviata]"
+            quota_descrizioni -= len(descrizione)
+        elif descrizione:
+            descrizione = descrizione[:250] + " [descrizione abbreviata]"
+        blocchi.append(f"OPERAZIONE {n}\n{testa}\nDescrizione: {descrizione or 'n.d.'}")
+
+    premessa = (f"Export Mergermarket: {len(operazioni)} operazioni, dalla più recente. "
+                f"L'elenco è completo; ogni descrizione riporta gli aggiornamenti in ordine cronologico.\n\n")
+    return (premessa + "\n\n".join(blocchi))[:max_caratteri + 2000]
+
+
+def componi_supplementari(testi: dict) -> str:
+    """Testo dei documenti supplementari per il prompt, ciascuno entro il suo limite."""
+    parti = []
+    for fonte, testo in testi.items():
+        limite = LIMITI_SUPPLEMENTARI.get(fonte, LIMITE_SUPPLEMENTARE_DEFAULT)
+        corpo = testo or ""
+        if len(corpo) > limite:
+            corpo = corpo[:limite] + "\n[... testo abbreviato dal programma]"
+        parti.append(f"\n\n--- DOCUMENTO SUPPLEMENTARE: {fonte} ---\n{corpo}")
+    return "".join(parti)
+
+
+# ── 8. Riferimenti di pagina nei testi ───────────────────────────────────────
+
+_RE_RIF_MARCATORE = re.compile(r"\[\s*pp?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?\s*\]", re.IGNORECASE)
+_RE_RIF_ALLEGATO = re.compile(
+    r"\bp(?:p|ag|agina|age)?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?\s+(?:dell['’]allegato|of the attachment)",
+    re.IGNORECASE,
+)
+
+
+def converti_riferimenti_pagina(report: dict, pagine_originali: list, inglese: bool = False) -> None:
+    """
+    Nei testi del report sostituisce i riferimenti alle pagine dell'allegato
+    ("[p.12]" o "p. 12 dell'allegato") con il numero di pagina del PDF originale.
+    """
+    def originale(n):
+        return pagine_originali[n - 1] + 1 if 1 <= n <= len(pagine_originali) else None
+
+    def sostituisci(m):
+        a = originale(int(m.group(1)))
+        b = originale(int(m.group(2))) if m.group(2) else None
+        if a is None:
+            return m.group(0)
+        if b and b != a:
+            return f"(PDF pp. {a}-{b})" if inglese else f"(pp. {a}-{b} del PDF)"
+        return f"(PDF p. {a})" if inglese else f"(p. {a} del PDF)"
+
+    def visita(valore):
+        if isinstance(valore, str):
+            valore = _RE_RIF_MARCATORE.sub(sostituisci, valore)
+            return _RE_RIF_ALLEGATO.sub(sostituisci, valore)
+        if isinstance(valore, list):
+            return [visita(v) for v in valore]
+        if isinstance(valore, dict):
+            nuovo = {k: visita(v) for k, v in valore.items()}
+            # Nel campo "fonte" il riferimento va senza parentesi: "Bilancio, p. 12 del PDF"
+            if isinstance(nuovo.get("fonte"), str):
+                nuovo["fonte"] = re.sub(r"\((PDF pp?\. [\d-]+|pp?\. [\d-]+ del PDF)\)", r"\1", nuovo["fonte"])
+            return nuovo
+        return valore
+
+    for chiave in list(report.keys()):
+        if chiave in ("fonti", "_estrazione"):
+            continue
+        report[chiave] = visita(report[chiave])
