@@ -57,6 +57,8 @@ ETICHETTE_KPI = {
     "debito_bancario": "Debito bancario", "obbligazioni": "Obbligazioni",
     "debito_netto": "Debito netto (PFN)", "leva_finanziaria": "Leva finanziaria",
 }
+ETICHETTE_KPI.update({f"precedente.{k}": f"{v} (esercizio precedente)"
+                      for k, v in list(ETICHETTE_KPI.items())})
 
 PERIMETRI = {
     "auto": "Automatico (consolidato se presente)",
@@ -808,14 +810,36 @@ def _regola_perimetro(perimetro: str) -> str:
             "perimetro, usa quello.")
 
 
+DETTAGLI = {"completo": "Completo", "sintetico": "Sintetico"}
+
+
+def _regola_dettaglio(dettaglio: str) -> str:
+    if dettaglio == "sintetico":
+        return (
+            "LIVELLO DI DETTAGLIO: SINTETICO. Il report deve stare in due pagine. Limiti: "
+            "overview al massimo 120 parole; core_business e mercati 90 parole ciascuno; "
+            "struttura_controllo 90 parole; note di struttura_debito 80 parole; "
+            "note_aggiuntive 80 parole; ogni operazione_ma al massimo 60 parole, con al più "
+            "4 voci in \"passaggi\" (solo quelle che decidono l'esito). Riporta solo ciò che "
+            "serve a un avvocato per inquadrare società, debito, controllo e operazioni: "
+            "niente elenchi di progetti, tecnologie o dati accessori."
+        )
+    return (
+        "LIVELLO DI DETTAGLIO: COMPLETO. Sii esauriente ma ordinato: ogni informazione nel "
+        "campo che le compete, senza ripetere la stessa informazione in campi diversi."
+    )
+
+
 def costruisci_prompt_estrazione(nome: str, anno: str, lingua_prompt: str, n_pagine: int,
                                  nota_estrazione: str, testo_suppl: str,
-                                 perimetro: str, fonti_supplementari: list) -> str:
+                                 perimetro: str, fonti_supplementari: list,
+                                 dettaglio: str = "completo") -> str:
     elenco_fonti = ", ".join(fonti_supplementari) if fonti_supplementari else "nessuno"
     return f"""Sei un analista M&A e finance di uno studio legale internazionale.
 Analizza il bilancio allegato di **{nome}** (esercizio {anno}) e, se presenti, i documenti supplementari.
 {nota_estrazione}
 Produci un report strutturato in JSON, con tutti i testi {lingua_prompt}.
+{_regola_dettaglio(dettaglio)}
 
 Documenti supplementari forniti: {elenco_fonti}.
 {testo_suppl}
@@ -895,6 +919,26 @@ REGOLE DI METODO (valgono per tutto il report)
     Segnala come discrepanza solo due valori che dovrebbero coincidere e non
     coincidono: valore nominale, valore contabile e pagamenti contrattuali
     dello stesso debito sono grandezze diverse, non una discrepanza.
+
+12. OGNI COSA AL SUO POSTO, UNA VOLTA SOLA.
+    - "mercati": mercati, aree geografiche, clienti, contesto. Non sede,
+      addetti o unità locali.
+    - "ownership": soci, controllo, patti, organi sociali. Non l'elenco
+      delle controllate (al più il loro numero, in una frase).
+    - Non scrivere nei testi l'esito dei tuoi controlli ("check contabile:
+      verificato"), né rimandi alla numerazione dei documenti che hai
+      ricevuto ("operazioni n. 7-37 dell'elenco"), né conteggi di servizio
+      della visura ("Numero in carica: 5").
+    - Non ripetere la stessa informazione due volte, nemmeno con parole
+      diverse, nello stesso campo o in campi diversi.
+
+13. ESERCIZIO PRECEDENTE. Compila "dati_anno_precedente" con gli stessi
+    dati letti nella colonna dell'esercizio precedente degli stessi
+    prospetti e delle stesse tabelle (stesse regole, stessa unità, stesso
+    perimetro). Se un dato dell'esercizio precedente non è esposto nelle
+    pagine fornite metti null: non ricavarlo da percentuali di variazione.
+    Per i bilanci civilistici lascia "ebitda" a null e compila i quattro
+    componenti, come per l'esercizio corrente.
 
 10. DOCUMENTI SUPPLEMENTARI. La visura è già ridotta alle sezioni utili e
     l'export Mergermarket elenca tutte le operazioni: leggili per intero.
@@ -1090,6 +1134,24 @@ SCHEMA JSON DI OUTPUT
     "altri_accantonamenti_b13": null
   }},
   "ebitda_dichiarato": null,
+  "dati_anno_precedente": {{
+    "anno": "",
+    "ricavi": null,
+    "ebitda": null,
+    "ebit": null,
+    "utile_netto": null,
+    "totale_attivo": null,
+    "patrimonio_netto": null,
+    "cassa": null,
+    "indebitamento_totale": null,
+    "debito_bancario": null,
+    "obbligazioni": null,
+    "debito_netto": null,
+    "differenza_a_b": null,
+    "ammortamenti_svalutazioni_b10": null,
+    "accantonamenti_rischi_b12": null,
+    "altri_accantonamenti_b13": null
+  }},
   "struttura_debito": {{
     "indebitamento_totale": null,
     "debito_bancario": null,
@@ -1122,7 +1184,7 @@ SCHEMA JSON DI OUTPUT
     "note": ""
   }},
   "operazioni_ma": [
-    {{"anno": "", "tipo": "", "descrizione": "", "fonte": ""}}
+    {{"anno": "", "tipo": "", "descrizione": "", "passaggi": [], "fonte": ""}}
   ],
   "dati_non_trovati": [
     {{"campo": "", "motivo": ""}}
@@ -1156,6 +1218,16 @@ hanno elenco soci in visura: cerca le quote nel bilancio (tabella dell'area
 di consolidamento, relazione sul governo societario, nota sulle parti
 correlate) e riporta in "struttura_controllo" patti parasociali e natura
 del controllo (solitario, congiunto, nessuno).
+
+"passaggi" (in ogni operazione) — lista di frasi brevi, una per ogni
+autorizzazione, indagine o tappa rilevante di un'operazione NON ancora
+completata, nella forma "Autorità o tappa: stato o esito (data)". Esempio:
+["UK CMA: autorizzata (04/11/2025)", "Commissione Europea: Fase II in
+corso, termini sospesi (27/08/2026)"]. In "descrizione" resta solo la
+sintesi dell'operazione e del suo stato; il dettaglio va in "passaggi".
+Per le operazioni completate lascia la lista vuota.
+
+"note" di struttura_debito — una informazione per voce, separate da " | ".
 
 "operazioni_ma" — SOLO operazioni descritte nei documenti forniti. Per
 ognuna compila "fonte": "Bilancio [p.N]" oppure il nome del documento
@@ -1197,6 +1269,10 @@ COME PROCEDERE, per ogni campo numerico:
    (d) che l'unità sia stata convertita correttamente nell'unità dichiarata in "unita";
    (e) il segno; (f) se c'è un "calcolo", rifai l'operazione.
 3. Se un campo è null, cerca comunque il dato nel documento: se lo trovi, proponilo.
+4. Controlla allo stesso modo "dati_anno_precedente": ogni valore deve venire dalla colonna
+   dell'esercizio PRECEDENTE della stessa riga usata per il {anno}. L'errore tipico è lo
+   scambio delle due colonne. Per questi campi usa il nome "precedente.<campo>"
+   (es. "precedente.ricavi") e non servono pagina e voce.
 
 DEFINIZIONI DEI CAMPI:
 - ricavi: civilistico = voce A.1 (non il valore della produzione); IFRS = totale ricavi del CE.
@@ -1284,6 +1360,8 @@ def _it(n: float) -> str:
 
 
 def _sezione_di(campo: str) -> str:
+    if campo.startswith("precedente."):
+        return "dati_anno_precedente"
     if campo in KPI_FINANZIARI:
         return "dati_finanziari"
     if campo in KPI_DEBITO:
@@ -1307,7 +1385,22 @@ def applica_verifica(report: dict, verifica: dict) -> list:
             continue
         sezione = _sezione_di(campo)
         contenitore = report.get(sezione)
-        if not isinstance(contenitore, dict) or campo not in contenitore:
+        precedente = sezione == "dati_anno_precedente"
+        chiave = campo.split(".", 1)[1] if precedente else campo
+        if not isinstance(contenitore, dict) or chiave not in contenitore:
+            continue
+        if precedente:
+            # Esercizio precedente: nessuna fonte per voce; si corregge il valore e lo si annota.
+            if esito == "corretto":
+                nuovo = _numero(riga.get("valore_corretto"))
+                vecchio = _numero(contenitore.get(chiave))
+                if nuovo is not None and (vecchio is None
+                                          or abs(nuovo - vecchio) > 0.005 * max(abs(vecchio), 1)):
+                    contenitore[chiave] = nuovo
+                    registro.append({
+                        "campo": campo, "esito": "corretto", "prima": vecchio, "dopo": nuovo,
+                        "motivo": riga.get("motivo", ""),
+                    })
             continue
 
         if esito == "corretto":
@@ -1460,21 +1553,24 @@ def completa_leva(report: dict) -> None:
     dichiarata = _numero(deb.get("leva_dichiarata"))
     definizione = str(deb.get("leva_dichiarata_definizione") or "").strip()
 
+    def x(valore):
+        return f"{valore:.2f}".replace(".", ",") + "x"
+
     calcolata, descrizione = None, ""
     if pfn is not None and ebitda is not None:
         if pfn <= 0:
-            descrizione = "Leva non significativa: posizione di cassa netta."
+            descrizione = "Leva (PFN/EBITDA) non significativa: posizione di cassa netta."
         elif ebitda <= 0:
-            descrizione = "Leva non significativa: EBITDA nullo o negativo."
+            descrizione = "Leva (PFN/EBITDA) non significativa: EBITDA nullo o negativo."
         else:
             calcolata = round(pfn / ebitda, 2)
-            descrizione = f"Leva calcolata dal programma: PFN / EBITDA = {calcolata:.2f}x."
+            descrizione = f"Leva: PFN/EBITDA = {x(calcolata)}."
     else:
-        descrizione = "Leva non calcolabile: PFN o EBITDA non disponibili."
+        descrizione = "Leva (PFN/EBITDA) non calcolabile: PFN o EBITDA non disponibili."
 
     if dichiarata is not None:
-        descrizione += (f" Leva dichiarata dalla società: {dichiarata:.2f}x"
-                        + (f" ({definizione})." if definizione else "."))
+        descrizione += (f" Leva dichiarata dalla società: {x(dichiarata)}"
+                        + (f" ({definizione.rstrip('. ')})." if definizione else "."))
 
     deb["leva_finanziaria"] = calcolata
     deb["leva_definizione"] = descrizione
@@ -1483,6 +1579,106 @@ def completa_leva(report: dict) -> None:
         deb["note"] = descrizione
     elif descrizione not in nota:
         deb["note"] = f"{nota} | {descrizione}"
+
+
+CAMPI_PRECEDENTE = KPI_TUTTI  # stessi campi dell'esercizio corrente
+
+
+def completa_precedente(report: dict) -> None:
+    """
+    Prima della normalizzazione: mette in ordine "dati_anno_precedente"
+    (numeri puri, EBITDA civilistico dai componenti).
+    """
+    prec = report.get("dati_anno_precedente")
+    if not isinstance(prec, dict):
+        report["dati_anno_precedente"] = {}
+        return
+    pulito = {"anno": str(prec.get("anno") or "").strip()}
+    for campo in CAMPI_PRECEDENTE:
+        pulito[campo] = _numero(prec.get(campo))
+    a_b = _numero(prec.get("differenza_a_b"))
+    b10 = _numero(prec.get("ammortamenti_svalutazioni_b10"))
+    civilistico = "civilistico" in str(report.get("tipo_bilancio", "")).lower()
+    if a_b is not None and b10 is not None and (pulito["ebitda"] is None or civilistico):
+        pulito["ebitda"] = (a_b + b10 + (_numero(prec.get("accantonamenti_rischi_b12")) or 0.0)
+                            + (_numero(prec.get("altri_accantonamenti_b13")) or 0.0))
+        if pulito["ebit"] is None:
+            pulito["ebit"] = a_b
+        if pulito["ammortamenti"] is None:
+            pulito["ammortamenti"] = b10
+    report["dati_anno_precedente"] = pulito
+
+
+def normalizza_precedente(report: dict) -> None:
+    """
+    Dopo la normalizzazione a euro dell'esercizio corrente: porta in euro anche
+    l'esercizio precedente con lo stesso fattore e scarta i confronti impossibili.
+    """
+    prec = report.get("dati_anno_precedente")
+    fattore = (report.get("dati_finanziari") or {}).get("_fattore")
+    if not isinstance(prec, dict) or not fattore or prec.get("_normalizzato"):
+        return
+    for campo in CAMPI_PRECEDENTE:
+        if prec.get(campo) is not None:
+            prec[campo] = prec[campo] * fattore
+    prec["_normalizzato"] = True
+    if not any(prec.get(c) is not None for c in CAMPI_PRECEDENTE):
+        report["dati_anno_precedente"] = {}
+
+
+_RE_FRASE = re.compile(r"(?<=[.!?])\s+(?=[A-ZÀ-Ü0-9(])")
+
+
+def _senza_ripetizioni(testo: str) -> str:
+    """Toglie le frasi ripetute identiche (o quasi) all'interno dello stesso testo."""
+    frasi = _RE_FRASE.split(testo)
+    if len(frasi) < 2:
+        return testo
+    viste, tenute = [], []
+    for frase in frasi:
+        chiave = re.sub(r"[^a-zà-ú0-9]+", " ", frase.lower()).strip()
+        parole = set(chiave.split())
+        doppia = False
+        if len(parole) >= 6:
+            for altra in viste:
+                comuni = len(parole & altra)
+                if comuni >= 0.85 * max(len(parole), len(altra)):
+                    doppia = True
+                    break
+        if not doppia:
+            tenute.append(frase)
+            if len(parole) >= 6:
+                viste.append(parole)
+    return " ".join(tenute)
+
+
+def pulisci_testi(report: dict) -> None:
+    """Rimuove le frasi ripetute nei campi di testo."""
+    def visita(valore):
+        if isinstance(valore, str):
+            return _senza_ripetizioni(valore)
+        if isinstance(valore, list):
+            return [visita(v) for v in valore]
+        if isinstance(valore, dict):
+            return {k: (visita(v) if k not in ("fonte",) else v) for k, v in valore.items()}
+        return valore
+    for campo in ("overview", "core_business", "mercati", "note_aggiuntive", "operazioni_ma", "ownership"):
+        if campo in report:
+            report[campo] = visita(report[campo])
+    deb = report.get("struttura_debito")
+    if isinstance(deb, dict):
+        for campo in ("scadenze_principali",):
+            if isinstance(deb.get(campo), str):
+                deb[campo] = _senza_ripetizioni(deb[campo])
+        if isinstance(deb.get("note"), str):
+            # le note sono voci separate da " | ": si tolgono le voci doppie
+            voci, viste = [], set()
+            for voce in [v.strip() for v in deb["note"].split("|") if v.strip()]:
+                chiave = re.sub(r"\W+", " ", voce.lower()).strip()
+                if chiave not in viste:
+                    viste.add(chiave)
+                    voci.append(voce)
+            deb["note"] = " | ".join(voci)
 
 
 def rimappa_fonti(report: dict, pagine_originali: list) -> None:
@@ -1552,7 +1748,7 @@ def controlli_fonti(report: dict) -> list:
 def _estratto_per_verifica(report: dict) -> dict:
     """La parte del report che il revisore deve controllare."""
     chiavi = ["tipo_bilancio", "perimetro", "dati_finanziari", "componenti_ebitda",
-              "ebitda_dichiarato", "struttura_debito", "fonti", "overview", "core_business",
+              "ebitda_dichiarato", "dati_anno_precedente", "struttura_debito", "fonti", "overview", "core_business",
               "mercati", "ownership", "operazioni_ma", "note_aggiuntive"]
     return {k: report.get(k) for k in chiavi if k in report}
 
@@ -1560,7 +1756,8 @@ def _estratto_per_verifica(report: dict) -> dict:
 def genera_report_bilancio(client, pdf_ridotto: bytes, info: dict, nome: str, anno: str,
                            lingua_prompt: str, testo_suppl: str = "",
                            fonti_supplementari: list = None, perimetro: str = "auto",
-                           verifica: bool = True, on_evento=None) -> dict:
+                           verifica: bool = True, on_evento=None,
+                           dettaglio: str = "completo") -> dict:
     """
     Esegue estrazione, verifica e calcoli e restituisce il report (dict),
     non ancora normalizzato a euro: la normalizzazione resta in app.py.
@@ -1589,7 +1786,7 @@ def genera_report_bilancio(client, pdf_ridotto: bytes, info: dict, nome: str, an
     while True:
         prompt = costruisci_prompt_estrazione(
             nome, anno, lingua_prompt, len(pagine_originali), nota, testo_suppl,
-            perimetro, fonti_supplementari or [],
+            perimetro, fonti_supplementari or [], dettaglio,
         )
         documento = _blocco_documento(pdf_corrente)
         try:
@@ -1655,7 +1852,13 @@ def genera_report_bilancio(client, pdf_ridotto: bytes, info: dict, nome: str, an
                 "motivo": f"Seconda lettura non riuscita: {e}",
             }]
 
+    for op in report["operazioni_ma"]:
+        passaggi = op.get("passaggi")
+        op["passaggi"] = ([str(p).strip() for p in passaggi if str(p).strip()]
+                          if isinstance(passaggi, list) else [])
     note_calcolo = completa_calcoli(report)
+    completa_precedente(report)
+    pulisci_testi(report)
     rimappa_fonti(report, pagine_originali)
     report["_verifica"] = registro
     report["_note_calcolo"] = note_calcolo
@@ -1668,7 +1871,9 @@ def genera_report_bilancio(client, pdf_ridotto: bytes, info: dict, nome: str, an
         "modalita": info.get("mode", ""),
         "criterio": info.get("criterio", ""),
         "verifica_eseguita": verifica_eseguita,
+        "dettaglio": dettaglio,
     }
+    report["_lingua"] = "en" if "ingles" in lingua_prompt else "it"
     return report
 
 
