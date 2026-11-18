@@ -12,7 +12,8 @@ import time
 import gspread
 from pypdf import PdfReader, PdfWriter
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime as _datetime
+from zoneinfo import ZoneInfo
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -22,6 +23,17 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
 import bilancio_engine as be
+
+
+class datetime(_datetime):
+    """Come datetime, ma now() restituisce l'ora italiana: il server di
+    Streamlit Cloud usa l'ora UTC e i report risultavano indietro di 1-2 ore."""
+    @classmethod
+    def now(cls, tz=None):
+        try:
+            return _datetime.now(tz or ZoneInfo("Europe/Rome"))
+        except Exception:
+            return _datetime.now(tz)
 
 # ── Configurazione pagina ─────────────────────────────────────────────────────
 
@@ -1062,9 +1074,11 @@ def genera_word(reports: list) -> bytes:
             ("Debito Bancario",      _fmt(debito.get("debito_bancario"))),
             ("Obbligazioni",         _fmt(debito.get("obbligazioni"))),
             ("Debito Netto",         _fmt(debito.get("debito_netto"))),
-            ("Leva Finanziaria",     str(debito.get("leva_finanziaria", "N/D"))),
+            ("Leva Finanziaria (PFN/EBITDA)", fmt_leva(debito)),
             ("Scadenze",             debito.get("scadenze_principali", "N/D") or "N/D"),
         ]
+        if isinstance(debito, dict) and debito.get("note") not in (None, "", "N/D"):
+            kpi_deb.append(("Note", debito.get("note")))
         add_kpi_table(doc, kpi_deb)
 
         # ── Sezioni testuali ──────────────────────────────────────────────────
@@ -1081,24 +1095,89 @@ def genera_word(reports: list) -> bytes:
             elif label == "Ownership":
                 own = report.get("ownership", {})
                 if isinstance(own, dict):
-                    testo = (f"Azionista principale: {own.get('azionista_principale','N/D')} "
-                             f"({own.get('quota_principale','N/D')}). "
-                             f"{own.get('struttura_controllo','')}")
+                    vuoto = (None, "", "N/D")
+                    parti = []
+                    if own.get("azionista_principale") not in vuoto:
+                        quota = own.get("quota_principale")
+                        parti.append(
+                            f"Azionista principale: {own['azionista_principale']}"
+                            + (f" ({quota})" if quota not in vuoto else "") + "."
+                        )
+                    if own.get("altri_azionisti") not in vuoto:
+                        parti.append(f"Altri azionisti: {own['altri_azionisti']}")
+                    for chiave in ("struttura_controllo", "note"):
+                        if own.get(chiave) not in vuoto:
+                            parti.append(str(own[chiave]))
+                    testo = " ".join(parti) or "N/D"
                 else:
                     testo = str(own)
-            else:  # Operazioni M&A
-                ops = report.get("operazioni_ma", [])
-                testo = "; ".join(
-                    f"{o.get('anno','')} — {o.get('tipo','')} — {o.get('descrizione','')}"
-                    for o in ops
-                    if o.get("descrizione","N/D") != "N/D"
-                ) or "N/D"
+            else:  # Operazioni M&A: un paragrafo per operazione
+                ops = [o for o in report.get("operazioni_ma", [])
+                       if isinstance(o, dict) and o.get("descrizione", "N/D") not in ("", "N/D")]
+                if ops:
+                    add_heading(label, level=2)
+                    for o in ops:
+                        riga = " — ".join(
+                            str(x) for x in (o.get("anno"), o.get("tipo"), o.get("descrizione")) if x
+                        )
+                        if o.get("fonte"):
+                            riga += f" (fonte: {o['fonte']})"
+                        p = doc.add_paragraph(riga)
+                        p.runs[0].font.size = Pt(10)
+                        p.paragraph_format.space_after = Pt(4)
+                continue
 
             if testo and testo != "N/D":
                 add_heading(label, level=2)
                 p = doc.add_paragraph(testo)
                 p.runs[0].font.size = Pt(10)
                 p.paragraph_format.space_after = Pt(6)
+
+        # ── Fonti dei dati ────────────────────────────────────────────────────
+        fonti = report.get("fonti") or {}
+        if fonti:
+            esiti = {e.get("campo"): e.get("esito") for e in report.get("_verifica") or []}
+            etichette_esito = {"ok": "confermato", "corretto": "corretto in verifica",
+                               "non_verificabile": "non verificabile", "da_verificare": "da verificare"}
+            righe_fonti = []
+            for campo in be.KPI_TUTTI:
+                fonte = fonti.get(campo) or {}
+                if not (fonte.get("pagina") or fonte.get("voce") or fonte.get("calcolo")):
+                    continue
+                righe_fonti.append((
+                    be.ETICHETTE_KPI[campo],
+                    str(fonte.get("pagina") or "—"),
+                    str(fonte.get("voce") or "—"),
+                    str(fonte.get("calcolo") or fonte.get("letto") or "—"),
+                    etichette_esito.get(esiti.get(campo), ""),
+                ))
+            if righe_fonti:
+                add_heading("Fonti dei dati", level=2)
+                tabella = doc.add_table(rows=1, cols=5)
+                tabella.style = "Table Grid"
+                tabella.alignment = WD_TABLE_ALIGNMENT.LEFT
+                for c, titolo in enumerate(["Dato", "Pagina PDF", "Voce letta nel bilancio",
+                                            "Valore letto / calcolo", "Controllo"]):
+                    cella = tabella.rows[0].cells[c]
+                    cella.text = titolo
+                    cella.paragraphs[0].runs[0].font.bold = True
+                    cella.paragraphs[0].runs[0].font.size = Pt(8)
+                    cella.paragraphs[0].runs[0].font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+                for valori in righe_fonti:
+                    celle = tabella.add_row().cells
+                    for c, valore in enumerate(valori):
+                        celle[c].text = valore
+                        if celle[c].paragraphs[0].runs:
+                            celle[c].paragraphs[0].runs[0].font.size = Pt(8)
+                estr = report.get("_estrazione") or {}
+                if estr:
+                    p = doc.add_paragraph(
+                        f"Pagine del PDF analizzate: {_intervalli(estr.get('pagine_inviate', []))} "
+                        f"su {estr.get('pagine_totali', '?')}. I numeri di pagina sono quelli del file PDF, "
+                        f"non quelli stampati sul documento."
+                    )
+                    p.runs[0].font.size = Pt(8)
+                    p.runs[0].font.color.rgb = RGBColor(0x99, 0x99, 0x99)
 
     # ── Footer nota metodologica ──────────────────────────────────────────────
     doc.add_page_break()
@@ -1356,6 +1435,11 @@ if st.session_state["pagina"] == "genera":
                         unsafe_allow_html=True,
                     )
                 else:
+                    if total > 300 and pagine_max < 100:
+                        st.caption(
+                            f"Documento molto lungo ({total} pagine): per ridurre i dati mancanti puoi "
+                            "portare a 100 le pagine massime nelle Opzioni di analisi."
+                        )
                     perimetro_txt = ""
                     if info.get("ha_consolidato") and info.get("ha_esercizio"):
                         perimetro_txt = f' — Il PDF contiene consolidato ed esercizio: privilegiato il {info.get("perimetro")}'
@@ -1425,7 +1509,7 @@ if st.session_state["pagina"] == "genera":
     with col1:
         st.caption("📈 Export Mergermarket")
         mergermarket = st.file_uploader(
-            "Mergermarket", type=["pdf", "csv"],
+            "Mergermarket", type=["xlsx", "csv", "pdf"],
             key="merger", label_visibility="collapsed"
         )
 
@@ -1452,10 +1536,7 @@ if st.session_state["pagina"] == "genera":
         contenuto = mergermarket.getvalue()
 
         def _leggi_mergermarket(contenuto=contenuto, nome_file=mergermarket.name):
-            if nome_file.lower().endswith(".pdf"):
-                reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
-                return "".join(p.extract_text() or "" for p in reader.pages)
-            return contenuto.decode("utf-8", errors="replace")
+            return be.leggi_mergermarket(nome_file, contenuto)
 
         try:
             testi_supplementari["Mergermarket"] = _cache_sessione(
@@ -1476,18 +1557,27 @@ if st.session_state["pagina"] == "genera":
         contenuto = visura.getvalue()
 
         def _leggi_visura(contenuto=contenuto):
+            # Visura con testo: si tengono le sezioni utili (sede, statuto, capitale,
+            # soci e patti, amministratori, sindaci, operazioni straordinarie).
+            testo = be.leggi_visura(contenuto)
+            if testo:
+                return testo
+            # Visura scansionata: la leggono le prime 40 pagine via Claude.
             try:
+                n_pagine = len(PdfReader(io.BytesIO(contenuto)).pages)
+                estratto = be.costruisci_pdf_chirurgico(contenuto, list(range(min(n_pagine, 40))))
                 client_temp = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
                 return be.testo_da_modello_veloce(client_temp, [
                     {"type": "document", "source": {
                         "type": "base64", "media_type": "application/pdf",
-                        "data": base64.b64encode(contenuto).decode()
+                        "data": base64.b64encode(estratto).decode()
                     }},
                     {"type": "text", "text": "Trascrivi fedelmente tutte le informazioni rilevanti "
                      "della visura, senza interpretarle e senza aggiungere nulla: ragione sociale, "
                      "forma giuridica, sede, codice fiscale, data di costituzione, capitale sociale, "
-                     "soci con quote, forma di amministrazione esattamente come indicata, "
-                     "amministratori e cariche, oggetto sociale, data di estrazione della visura."}
+                     "soci con quote e patti parasociali, forma di amministrazione esattamente come "
+                     "indicata, amministratori e cariche, sindaci, oggetto sociale, data di estrazione "
+                     "della visura."}
                 ])
             except Exception:
                 reader = PyPDF2.PdfReader(io.BytesIO(contenuto))
@@ -1551,9 +1641,7 @@ if st.session_state["pagina"] == "genera":
                 )
 
                 # Testo supplementare per questo report
-                testo_suppl = ""
-                for fonte, testo in testi_supplementari.items():
-                    testo_suppl += f"\n\n--- DOCUMENTO SUPPLEMENTARE: {fonte} ---\n{testo[:8000]}"
+                testo_suppl = be.componi_supplementari(testi_supplementari)
 
                 stato = st.empty()
                 try:
@@ -1602,7 +1690,7 @@ if st.session_state["pagina"] == "genera":
                 with st.spinner("Claude sta analizzando i documenti..."):
                     testo_completo = ""
                     for fonte, testo in testi_supplementari.items():
-                        testo_completo += f"\n\n--- FONTE: {fonte} ---\n{testo[:10000]}"
+                        testo_completo += f"\n\n--- FONTE: {fonte} ---\n{testo[:be.LIMITI_SUPPLEMENTARI.get(fonte, 10000)]}"
 
                     lingua_prompt2 = "in inglese" if lingua == "English" else "in italiano"
                     prompt2 = f"""Sei un analista M&A e finance di uno studio legale internazionale.
