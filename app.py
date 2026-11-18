@@ -510,17 +510,21 @@ def render_fonti_verifica(report: dict):
     corretti = [r for r in registro if r.get("esito") == "corretto"]
     dubbi = [r for r in registro if r.get("esito") in ("non_verificabile", "da_verificare", "non_eseguita")]
     testi = [r for r in registro if r.get("esito") == "testo_da_verificare"]
+    testi_corretti = [r for r in registro if r.get("esito") == "testo_corretto"]
     confermati = [r for r in registro if r.get("esito") == "ok"]
 
     if registro:
         if not (corretti or dubbi or testi):
             colore, bg, titolo = "#4caf50", "#1a2e1a", (
-                f"✅ <b>Seconda lettura</b> — {len(confermati)} valori riletti e confermati")
+                f"✅ <b>Seconda lettura</b> — {len(confermati)} valori riletti e confermati"
+                + (f", {len(testi_corretti)} frasi corrette nei testi" if testi_corretti else ""))
         else:
             colore, bg = "#e65100", "#2e2a1a"
             parti = [f"{len(confermati)} confermati"]
             if corretti:
                 parti.append(f"{len(corretti)} corretti")
+            if testi_corretti:
+                parti.append(f"{len(testi_corretti)} frasi corrette")
             if dubbi:
                 parti.append(f"{len(dubbi)} non verificabili")
             if testi:
@@ -581,7 +585,12 @@ def render_fonti_verifica(report: dict):
             f"<b>{esc(be.ETICHETTE_KPI.get(r['campo'], r['campo']))}</b>: {esc(str(r.get('motivo', '')))}"
             for r in dubbi
         ])
-        _lista("Affermazioni senza riscontro nel bilancio — da controllare", "#ff9800", [
+        _lista("Frasi corrette dalla seconda lettura", "#90caf9", [
+            f"<b>{esc(str(r.get('campo', '')))}</b>: «{esc(str(r.get('frase', '')))}» → "
+            f"«{esc(str(r.get('correzione', '')) or '(eliminata)')}» — {esc(str(r.get('motivo', '')))}"
+            for r in testi_corretti
+        ])
+        _lista("Affermazioni senza riscontro nei documenti — da controllare", "#ff9800", [
             f"<b>{esc(str(r.get('campo', '')))}</b>: «{esc(str(r.get('frase', '')))}» — {esc(str(r.get('motivo', '')))}"
             for r in testi
         ])
@@ -1326,9 +1335,10 @@ if st.session_state["pagina"] == "genera":
         with col_o2:
             pagine_max = st.selectbox(
                 "Pagine massime per bilancio",
-                options=[25, 40, 60, 100],
-                index=2,
-                key="opt_pagine_max",
+                options=[None, 25, 40, 60, 100],
+                format_func=lambda v: "Automatico (60, oppure 100 oltre le 250 pagine)" if v is None else str(v),
+                index=0,
+                key="opt_pagine_max_v2",
                 help="Più pagine = meno dati mancanti, ma analisi più lenta e costosa. "
                      "Se l'account API non regge la richiesta, il sistema riduce le pagine da solo.",
             )
@@ -1447,7 +1457,7 @@ if st.session_state["pagina"] == "genera":
                         unsafe_allow_html=True,
                     )
                 else:
-                    if total > 300 and pagine_max < 100:
+                    if total > 300 and info.get("pagine_max", 100) < 100:
                         st.caption(
                             f"Documento molto lungo ({total} pagine): per ridurre i dati mancanti puoi "
                             "portare a 100 le pagine massime nelle Opzioni di analisi."

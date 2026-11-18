@@ -237,7 +237,8 @@ CATEGORIE = {
         ("perimetro di consolidamento", 6), ("closing", 4), ("signing", 4),
         ("opa ", 5), ("offerta pubblica", 6), ("conferimento", 4),
         ("acquisition", 5), ("merger", 6), ("disposal", 4), ("divestment", 5),
-        ("sale of equity interest", 9), ("assets held for sale", 8),
+        ("sale of equity interest", 9), ("assets held for sale", 10),
+        ("attività destinate alla vendita", 10),
         ("discontinued operations", 5), ("consolidation scope", 7),
         ("scope of consolidation", 7), ("subsequent events", 7), ("events after", 6),
         ("memorandum of understanding", 5), ("sold to", 4),
@@ -250,7 +251,8 @@ CATEGORIE = {
         ("aree geografiche", 5), ("stabiliment", 3), ("dipendenti", 2),
         ("evoluzione prevedibile", 4), ("lettera agli azionisti", 4),
         ("letter to the shareholders", 9), ("business model", 7),
-        ("reporting segments", 7), ("backlog", 5), ("geographic area", 9),
+        ("reporting segments", 7), ("backlog", 5), ("geographic area", 9), ("by geographic area", 8),
+        ("per area geografica", 14), ("ripartizione geografica", 10),
         ("by geographical", 5), ("market context", 5), ("new contracts", 5),
         ("business line", 4), ("employees", 2),
     ],
@@ -428,7 +430,11 @@ def _priorita_scansione(testi_norm: list) -> tuple:
     return unico, f"capitoli del fascicolo ({nomi})"
 
 
-def analizza_pdf(pdf_bytes: bytes, perimetro: str = "auto", pagine_max: int = PAGINE_MAX_DEFAULT,
+PAGINE_MAX_DOCUMENTI_LUNGHI = 100   # oltre SOGLIA_DOCUMENTO_LUNGO pagine
+SOGLIA_DOCUMENTO_LUNGO = 250
+
+
+def analizza_pdf(pdf_bytes: bytes, perimetro: str = "auto", pagine_max: int = None,
                  pagine_manuali: str = "") -> dict:
     """
     Analizza il PDF e decide quali pagine inviare.
@@ -455,6 +461,13 @@ def analizza_pdf(pdf_bytes: bytes, perimetro: str = "auto", pagine_max: int = PA
     info["total_pages"] = totale
     if totale == 0:
         raise ErroreEstrazione("Il PDF non contiene pagine leggibili.")
+
+    # Scelta automatica: i documenti lunghi (relazioni annuali) hanno bisogno di più pagine.
+    info["pagine_max_automatico"] = not pagine_max
+    if not pagine_max:
+        pagine_max = (PAGINE_MAX_DOCUMENTI_LUNGHI if totale > SOGLIA_DOCUMENTO_LUNGO
+                      else PAGINE_MAX_DEFAULT)
+    info["pagine_max"] = pagine_max
 
     testi_norm = [_normalizza(p["testo"]) for p in pagine]
     info["avg_chars"] = sum(p["caratteri"] for p in pagine) / totale
@@ -612,7 +625,7 @@ def costruisci_pdf_chirurgico(pdf_bytes: bytes, page_indices: list) -> bytes:
 
 
 def prepara_bilancio(pdf_bytes: bytes, perimetro: str = "auto",
-                     pagine_max: int = PAGINE_MAX_DEFAULT, pagine_manuali: str = "") -> tuple:
+                     pagine_max: int = None, pagine_manuali: str = "") -> tuple:
     """
     Punto d'ingresso: restituisce (pdf_ridotto_bytes, info).
 
@@ -857,24 +870,40 @@ REGOLE DI METODO (valgono per tutto il report)
 7. CATENE DI CONTROLLO. Distingui partecipazioni dirette e indirette e
    non invertire la direzione del controllo (chi controlla chi).
 
-8. PAGINE CITATE NEI TESTI. Quando in un campo di testo citi una pagina del
-   bilancio, scrivi SOLO il marcatore [p.N], dove N è il numero d'ordine
-   della pagina nell'allegato (da 1 a {n_pagine}). Il programma lo converte
-   nel numero di pagina del PDF originale. Non scrivere "dell'allegato" né
-   il numero stampato sulla pagina.
+8. PAGINE CITATE NEI TESTI. Ogni volta che in un campo di testo citi una
+   pagina del bilancio, anche nel mezzo di una frase, scrivi SOLO il
+   marcatore [p.N], dove N è il numero d'ordine della pagina nell'allegato
+   (da 1 a {n_pagine}); per più pagine [p.N,M] o [p.N-M]. Esempi: "come
+   indicato a [p.34]", "le tabelle di [p.35,45]". Il programma converte i
+   marcatori nel numero di pagina del PDF originale. Non scrivere mai
+   "p. 34", "pagina 34", "dell'allegato" né il numero stampato sulla pagina.
 
 9. NIENTE COMMENTI SUL MATERIALE NEI TESTI. Nei campi overview,
    core_business, mercati, ownership e operazioni_ma non scrivere frasi
    come "il testo si interrompe", "la visura è troncata", "pagina non
    inclusa": riporta ciò che i documenti dicono. Le lacune del materiale
    vanno solo in "dati_non_trovati" o, in una riga, in "note_aggiuntive".
+   Il report è letto da avvocati che non conoscono questo strumento: non
+   citare mai lo schema JSON, i nomi dei campi, il prompt, "l'estratto",
+   "l'allegato", "il programma" o i valori predefiniti.
+
+11. ESATTEZZA DEI TESTI. Copia nomi di persone e società lettera per
+    lettera come sono scritti nella fonte, anche se sembrano refusi (in tal
+    caso aggiungi "[sic]"). Scrivi i numeri con il punto per le migliaia e
+    la virgola per i decimali (1.940.282.698; 21,19%). Prima di scrivere un
+    conteggio ("28 operazioni", "tre clienti") riconta gli elementi.
+    Segnala come discrepanza solo due valori che dovrebbero coincidere e non
+    coincidono: valore nominale, valore contabile e pagamenti contrattuali
+    dello stesso debito sono grandezze diverse, non una discrepanza.
 
 10. DOCUMENTI SUPPLEMENTARI. La visura è già ridotta alle sezioni utili e
     l'export Mergermarket elenca tutte le operazioni: leggili per intero.
     Per ogni operazione Mergermarket riporta date di annuncio e di
     completamento, controparti, corrispettivo e, se l'operazione non è
     completata, l'ULTIMO aggiornamento disponibile (le descrizioni sono in
-    ordine cronologico: l'ultima notizia è in fondo). Se due notizie della
+    ordine cronologico: l'ultima notizia è in fondo) e lo stato di ciascuna
+    autorizzazione o indagine citata (autorità, esito o stato, data),
+    senza ometterne nessuna. Se due notizie della
     stessa fonte si contraddicono, segnalalo invece di sceglierne una.
 
 ═══════════════════════════════════════════════════════════════════
@@ -1043,7 +1072,7 @@ SCHEMA JSON DI OUTPUT
   "core_business": "",
   "mercati": "",
   "dati_finanziari": {{
-    "unita": "migliaia di euro",
+    "unita": "<unità dei prospetti: euro | migliaia di euro | milioni di euro>",
     "ricavi": null,
     "ebitda": null,
     "ebit": null,
@@ -1113,8 +1142,12 @@ ISTRUZIONI PER I CAMPI DI TESTO
 4. Eventuali discrepanze nei check contabili.
 
 "scadenze_principali" — profilo di scadenza del debito bancario e
-obbligazionario (esclusi leasing) in formato sintetico, es.:
+obbligazionario (esclusi leasing) per anno, usando il VALORE NOMINALE da
+rimborsare, in formato sintetico, es.:
 "2026: €131,9M | 2027: €245,4M | 2028: €430,4M (di cui bond €350M)".
+Se la società espone solo i pagamenti contrattuali (che possono includere
+interessi) o i valori contabili, usa quelli ma dichiaralo ("pagamenti
+contrattuali", "valore contabile"): non chiamarli nominali.
 Se non disponibile nelle pagine fornite, scrivi "N/D".
 
 "ownership" — usa SOLO soci e quote scritti nei documenti (bilancio o
@@ -1142,7 +1175,12 @@ nei documenti; "N/D" se le pagine fornite non ne parlano.
 """
 
 
-def costruisci_prompt_verifica(nome: str, anno: str, n_pagine: int, estratto: dict) -> str:
+def costruisci_prompt_verifica(nome: str, anno: str, n_pagine: int, estratto: dict,
+                               testo_suppl: str = "") -> str:
+    supplementari = (
+        "DOCUMENTI SUPPLEMENTARI usati dal collega (oltre al bilancio allegato):" + testo_suppl
+        if testo_suppl else "Il collega non aveva documenti supplementari."
+    )
     return f"""Sei un revisore. Un collega ha estratto dal bilancio allegato di **{nome}**
 (esercizio {anno}) i dati riportati sotto. Il tuo compito è RILEGGERE il documento
 e controllare ogni numero in modo indipendente, senza dare per buono il lavoro del collega.
@@ -1176,11 +1214,21 @@ DEFINIZIONI DEI CAMPI:
 - obbligazioni: prestiti obbligazionari (IFRS: valore nominale).
 - debito_netto: PFN / indebitamento finanziario netto pubblicato (IFRS: incl. leasing).
 
+{supplementari}
+
 Controlla anche i TESTI (overview, core_business, mercati, ownership, operazioni_ma,
-note): segnala ogni affermazione che NON trova riscontro nel documento allegato o che
-lo contraddice (date, quote, denominazioni, direzione del controllo, anno di riferimento).
-Non segnalare le affermazioni che potrebbero provenire dai documenti supplementari indicati
-nelle fonti delle operazioni.
+note, scadenze): confronta ogni affermazione con il bilancio allegato e con i documenti
+supplementari qui sopra e segnala ciò che non trova riscontro o li contraddice. In particolare:
+- date, quote, importi, denominazioni, direzione del controllo, anno di riferimento;
+- nomi di persone e società: devono essere scritti lettera per lettera come nella fonte;
+- conteggi ("28 operazioni", "tre clienti"): ricontali;
+- formato dei numeri (punto per le migliaia, virgola per i decimali) e somme;
+- etichette sbagliate (un pagamento contrattuale chiamato "nominale" o "valore contabile");
+- false discrepanze: grandezze diverse presentate come valori in contrasto;
+- riferimenti di pagina che non siano nella forma [p.N] (N = pagina dell'allegato);
+- frasi che parlano dello strumento anziché dell'azienda (schema, campi, estratto, allegato).
+Per ogni problema indica la frase ESATTA, copiata carattere per carattere dal testo del
+collega, e la frase corretta che deve sostituirla.
 
 Rispondi SOLO con un oggetto JSON valido, senza backtick:
 
@@ -1197,7 +1245,7 @@ Rispondi SOLO con un oggetto JSON valido, senza backtick:
     }}
   ],
   "testi": [
-    {{"campo": "overview", "frase": "", "problema": ""}}
+    {{"campo": "overview", "frase": "", "problema": "", "correzione": ""}}
   ]
 }}
 
@@ -1209,7 +1257,11 @@ REGOLE PER LA RISPOSTA:
   voce e valore letto). "non_verificabile": la pagina necessaria non è nell'allegato.
 - Usa "corretto" solo se sei certo e puoi indicare pagina e voce; nel dubbio usa
   "non_verificabile" spiegando il motivo.
-- "testi": lista vuota se non hai nulla da segnalare.
+- "testi": lista vuota se non hai nulla da segnalare. "frase" deve essere un passaggio
+  breve (una frase o parte di frase) copiato esattamente; "correzione" è il testo che lo
+  sostituisce, già completo e corretto, nella stessa lingua del report. Se la frase va
+  eliminata scrivi "correzione": "". Se non sei certo della correzione, lascia
+  "correzione": null e spiega il problema.
 """
 
 
@@ -1289,13 +1341,57 @@ def applica_verifica(report: dict, verifica: dict) -> list:
             registro.append({"campo": campo, "esito": "ok"})
 
     for riga in (verifica or {}).get("testi", []) or []:
-        if isinstance(riga, dict) and riga.get("frase"):
-            registro.append({
-                "campo": str(riga.get("campo", "testo")), "esito": "testo_da_verificare",
-                "frase": str(riga.get("frase"))[:400],
-                "motivo": str(riga.get("problema", ""))[:400],
-            })
+        if not (isinstance(riga, dict) and riga.get("frase")):
+            continue
+        frase = str(riga.get("frase"))
+        correzione = riga.get("correzione")
+        applicata = False
+        if isinstance(correzione, str) and correzione.strip() != frase.strip():
+            applicata = _sostituisci_nei_testi(report, frase, correzione)
+        voce = {
+            "campo": str(riga.get("campo", "testo")),
+            "esito": "testo_corretto" if applicata else "testo_da_verificare",
+            "frase": frase[:400],
+            "motivo": str(riga.get("problema", ""))[:400],
+        }
+        if applicata:
+            voce["correzione"] = correzione[:400]
+        registro.append(voce)
     return registro
+
+
+CAMPI_TESTO = ("overview", "core_business", "mercati", "ownership", "operazioni_ma",
+               "note_aggiuntive", "struttura_debito")
+
+
+def _sostituisci_nei_testi(report: dict, frase: str, correzione: str) -> bool:
+    """
+    Sostituisce `frase` con `correzione` nei campi di testo del report, solo se la
+    frase compare esattamente una volta (altrimenti la correzione resta da fare a mano).
+    """
+    trovati = []
+
+    def cerca(contenitore, chiave):
+        valore = contenitore[chiave]
+        if isinstance(valore, str):
+            if frase in valore:
+                trovati.append((contenitore, chiave, valore.count(frase)))
+        elif isinstance(valore, dict):
+            for k in list(valore.keys()):
+                cerca(valore, k)
+        elif isinstance(valore, list):
+            for i in range(len(valore)):
+                cerca(valore, i)
+
+    for campo in CAMPI_TESTO:
+        if campo in report:
+            cerca(report, campo)
+    if len(trovati) != 1 or trovati[0][2] != 1:
+        return False
+    contenitore, chiave, _n = trovati[0]
+    nuovo = contenitore[chiave].replace(frase, correzione)
+    contenitore[chiave] = re.sub(r"\s{2,}", " ", nuovo).strip()
+    return True
 
 
 def completa_calcoli(report: dict) -> list:
@@ -1542,10 +1638,10 @@ def genera_report_bilancio(client, pdf_ridotto: bytes, info: dict, nome: str, an
     registro = []
     verifica_eseguita = False
     if verifica:
-        avvisa("Seconda lettura di controllo dei numeri...")
+        avvisa("Seconda lettura di controllo di numeri e testi...")
         try:
             prompt_v = costruisci_prompt_verifica(
-                nome, anno, len(pagine_originali), _estratto_per_verifica(report)
+                nome, anno, len(pagine_originali), _estratto_per_verifica(report), testo_suppl
             )
             testo_v, _m, _u = chiama_claude(
                 client, [documento, {"type": "text", "text": prompt_v}],
@@ -1561,10 +1657,10 @@ def genera_report_bilancio(client, pdf_ridotto: bytes, info: dict, nome: str, an
 
     note_calcolo = completa_calcoli(report)
     rimappa_fonti(report, pagine_originali)
-    converti_riferimenti_pagina(report, pagine_originali, inglese="ingles" in lingua_prompt)
-
     report["_verifica"] = registro
     report["_note_calcolo"] = note_calcolo
+    converti_riferimenti_pagina(report, pagine_originali, inglese="ingles" in lingua_prompt)
+
     report["_estrazione"] = {
         "modello": modello,
         "pagine_inviate": [p + 1 for p in pagine_originali],
@@ -1794,45 +1890,115 @@ def componi_supplementari(testi: dict) -> str:
 
 # ── 8. Riferimenti di pagina nei testi ───────────────────────────────────────
 
-_RE_RIF_MARCATORE = re.compile(r"\[\s*pp?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?\s*\]", re.IGNORECASE)
-_RE_RIF_ALLEGATO = re.compile(
-    r"\bp(?:p|ag|agina|age)?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?\s+(?:dell['’]allegato|of the attachment)",
-    re.IGNORECASE,
-)
+_NUM = r"\d{1,3}(?!\d)"
+_ELENCO = rf"{_NUM}(?:\s?[-–]\s?{_NUM})?(?:\s?(?:,|;|\be\b|\band\b)\s?{_NUM}(?:\s?[-–]\s?{_NUM})?)*"
+# "p. 34", "pp. 34-36", "pagina 34", "pages 3, 5 and 9" scritti senza marcatore
+_RE_RIF_NUDO = re.compile(
+    rf"(?<![\w\[.])(?:pp?\.|pagg?\.|pagin[ae]|pages?)\s?({_ELENCO})(?!\s*\])", re.IGNORECASE)
+_RE_RIF_MARCATORE = re.compile(r"\[\s*(?:pp?|pagg?|pagin[ae]|pages?)\.?\s*([\d\s,;\-–eand]+?)\s*\]",
+                               re.IGNORECASE)
+_RE_MARCATORI_VICINI = re.compile(r"\[p\.([\d,\-]+)\](?:\s*[,;]?\s*(?:e|and)?\s*\[p\.([\d,\-]+)\])+")
+_RE_SUFFISSO_ALLEGATO = re.compile(r"(\[p\.[\d,\-]+\])\s*(?:dell['’]allegato|of the attachment)", re.IGNORECASE)
+
+
+# "a [p.34]", "vedi [p.3]", "di [p.5]": il riferimento fa parte della frase, niente parentesi
+_RE_PREPOSIZIONE = (r"(?:\b(?:a|ad|di|da|in|su|alla|alle|nella|nelle|della|delle|dalla|vedi|cfr\.?|"
+                    r"at|on|in|see|of|from)\s)$")
+
+
+def _posizioni(elenco: str) -> list:
+    """ "3, 5-7 e 9" -> [3, 5, 6, 7, 9] """
+    numeri = []
+    for parte in re.split(r"[,;]|\be\b|\band\b", elenco):
+        m = re.fullmatch(r"\s*(\d{1,3})\s*(?:[-–]\s*(\d{1,3}))?\s*", parte)
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+        if a > b:
+            a, b = b, a
+        numeri.extend(range(a, min(b, a + 60) + 1))
+    return numeri
+
+
+def _pagine_in_parole(pagine: list, inglese: bool) -> str:
+    """[65, 66, 67, 69] -> "pp. 65-67 e 69 del PDF" """
+    pagine = sorted(set(pagine))
+    gruppi, inizio, prec = [], pagine[0], pagine[0]
+    for p in pagine[1:]:
+        if p == prec + 1:
+            prec = p
+            continue
+        gruppi.append((inizio, prec))
+        inizio = prec = p
+    gruppi.append((inizio, prec))
+    pezzi = [str(a) if a == b else f"{a}-{b}" for a, b in gruppi]
+    congiunzione = " and " if inglese else " e "
+    elenco = pezzi[0] if len(pezzi) == 1 else ", ".join(pezzi[:-1]) + congiunzione + pezzi[-1]
+    sigla = "p." if len(pagine) == 1 else "pp."
+    return f"PDF {sigla} {elenco}" if inglese else f"{sigla} {elenco} del PDF"
+
+
+def _converti_testo(testo: str, pagine_originali: list, inglese: bool, parentesi: bool) -> str:
+    if not re.search(r"\d", testo):
+        return testo
+    # 1. tutto ciò che è un riferimento di pagina diventa un marcatore [p.N,...]
+    testo = _RE_RIF_MARCATORE.sub(
+        lambda m: "[p." + ",".join(str(n) for n in _posizioni(m.group(1))) + "]", testo)
+    def nudo(m):
+        # un riferimento senza marcatore si converte solo se può essere una pagina dell'allegato
+        numeri = _posizioni(m.group(1))
+        prima = m.string[max(0, m.start() - 30):m.start()].lower()
+        dopo = m.string[m.end():m.end() + 8].lower()
+        if (not numeri or max(numeri) > len(pagine_originali)
+                or re.match(r"\s*(?:di|of)\s+\d", dopo)            # "p. 3 di 347"
+                or "visura" in prima or "mergermarket" in prima):  # pagina di un altro documento
+            return m.group(0)
+        return "[p." + ",".join(str(n) for n in numeri) + "]"
+    testo = _RE_RIF_NUDO.sub(nudo, testo)
+    testo = _RE_SUFFISSO_ALLEGATO.sub(r"\1", testo)
+    # 2. marcatori adiacenti: uno solo
+    def unisci(m):
+        numeri = re.findall(r"\d+", m.group(0))
+        return "[p." + ",".join(numeri) + "]"
+    testo = _RE_MARCATORI_VICINI.sub(unisci, testo)
+    # 3. dal numero d'ordine nell'allegato alla pagina del PDF
+    def converti(m):
+        originali = [pagine_originali[n - 1] + 1 for n in map(int, re.findall(r"\d+", m.group(0)))
+                     if 1 <= n <= len(pagine_originali)]
+        if not originali:
+            return "(pagina non identificata)" if not inglese else "(page not identified)"
+        parole = _pagine_in_parole(originali, inglese)
+        prima = m.string[:m.start()]
+        dentro_parentesi = prima.count("(") > prima.count(")")
+        dopo_preposizione = re.search(_RE_PREPOSIZIONE, prima) is not None
+        if not parentesi or dentro_parentesi or dopo_preposizione:
+            return parole
+        return f"({parole})"
+    testo = re.sub(r"\[p\.[\d,\-]*\]", converti, testo)
+    # 4. pulizia degli spazi attorno ai riferimenti
+    testo = re.sub(r"(?<=[^\s(])\((?=(?:PDF )?pp?\. )", " (", testo)
+    testo = re.sub(r"\s+([,.;:)])", r"\1", testo)
+    testo = re.sub(r"\(\s+", "(", testo)
+    return re.sub(r" {2,}", " ", testo).strip()
 
 
 def converti_riferimenti_pagina(report: dict, pagine_originali: list, inglese: bool = False) -> None:
     """
-    Nei testi del report sostituisce i riferimenti alle pagine dell'allegato
-    ("[p.12]" o "p. 12 dell'allegato") con il numero di pagina del PDF originale.
+    Nei testi del report sostituisce ogni riferimento alle pagine dell'allegato
+    ("[p.12]", "p. 12", "pp. 3-5 dell'allegato") con le pagine del PDF originale,
+    unendo i riferimenti vicini: "(pp. 363-364 e 395 del PDF)".
     """
-    def originale(n):
-        return pagine_originali[n - 1] + 1 if 1 <= n <= len(pagine_originali) else None
-
-    def sostituisci(m):
-        a = originale(int(m.group(1)))
-        b = originale(int(m.group(2))) if m.group(2) else None
-        if a is None:
-            return m.group(0)
-        if b and b != a:
-            return f"(PDF pp. {a}-{b})" if inglese else f"(pp. {a}-{b} del PDF)"
-        return f"(PDF p. {a})" if inglese else f"(p. {a} del PDF)"
-
-    def visita(valore):
+    def visita(valore, parentesi=True):
         if isinstance(valore, str):
-            valore = _RE_RIF_MARCATORE.sub(sostituisci, valore)
-            return _RE_RIF_ALLEGATO.sub(sostituisci, valore)
+            return _converti_testo(valore, pagine_originali, inglese, parentesi)
         if isinstance(valore, list):
-            return [visita(v) for v in valore]
+            return [visita(v, parentesi) for v in valore]
         if isinstance(valore, dict):
-            nuovo = {k: visita(v) for k, v in valore.items()}
-            # Nel campo "fonte" il riferimento va senza parentesi: "Bilancio, p. 12 del PDF"
-            if isinstance(nuovo.get("fonte"), str):
-                nuovo["fonte"] = re.sub(r"\((PDF pp?\. [\d-]+|pp?\. [\d-]+ del PDF)\)", r"\1", nuovo["fonte"])
-            return nuovo
+            # nel campo "fonte" il riferimento va senza parentesi: "Bilancio pp. 6-7 del PDF"
+            return {k: visita(v, parentesi and k != "fonte") for k, v in valore.items()}
         return valore
 
     for chiave in list(report.keys()):
-        if chiave in ("fonti", "_estrazione"):
+        if chiave in ("fonti", "_estrazione", "dati_finanziari", "componenti_ebitda"):
             continue
         report[chiave] = visita(report[chiave])
