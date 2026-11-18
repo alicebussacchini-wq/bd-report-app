@@ -392,22 +392,120 @@ def confronta_anni(report_nuovo: dict, report_vecchio: dict) -> list:
     return warnings
 
 
+# Formato dei numeri: italiano di default; inglese per i report in inglese.
+_FORMATO = {"inglese": False}
+
+
+def imposta_formato(report: dict):
+    """Da chiamare prima di mostrare o esportare un report."""
+    _FORMATO["inglese"] = isinstance(report, dict) and report.get("_lingua") == "en"
+
+
+def _dec(valore: float, decimali: int) -> str:
+    testo = f"{valore:,.{decimali}f}"
+    if _FORMATO["inglese"]:
+        return testo
+    return testo.replace(",", "§").replace(".", ",").replace("§", ".")
+
+
 def _fmt(v):
-    """Formatta un numero in euro in modo leggibile."""
+    """Formatta un numero in euro in modo leggibile (€ 15,51 mld; € 679,0 mln)."""
     if v is None:
         return "N/D"
     try:
         v = float(v)
-        if abs(v) >= 1_000_000_000:
-            return f"€ {v/1_000_000_000:.2f}B"
-        elif abs(v) >= 1_000_000:
-            return f"€ {v/1_000_000:.1f}M"
-        elif abs(v) >= 1_000:
-            return f"€ {v/1_000:.0f}K"
-        else:
-            return f"€ {v:.0f}"
     except (TypeError, ValueError):
         return str(v)
+    inglese = _FORMATO["inglese"]
+    if abs(v) >= 1_000_000_000:
+        return f"€ {_dec(v/1_000_000_000, 2)}{'B' if inglese else ' mld'}"
+    if abs(v) >= 1_000_000:
+        return f"€ {_dec(v/1_000_000, 1)}{'M' if inglese else ' mln'}"
+    if abs(v) >= 1_000:
+        return f"€ {_dec(v/1_000, 0)}{'K' if inglese else ' mila'}"
+    return f"€ {_dec(v, 0)}"
+
+
+def fmt_pct(valore: float, decimali: int = 1, segno: bool = False) -> str:
+    testo = _dec(valore, decimali)
+    if segno and valore > 0:
+        testo = "+" + testo
+    return testo + "%"
+
+
+def confronto_esercizi(report: dict) -> list:
+    """
+    Righe per il confronto con l'esercizio precedente:
+    (etichetta, valore corrente, valore precedente, variazione), già formattate.
+    Lista vuota se l'esercizio precedente non è disponibile.
+    """
+    prec = report.get("dati_anno_precedente") or {}
+    if not report.get("_normalizzato") or not prec.get("_normalizzato"):
+        return []
+    fin = report.get("dati_finanziari") or {}
+    deb = report.get("struttura_debito") if isinstance(report.get("struttura_debito"), dict) else {}
+
+    def num(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def variazione(c, p):
+        # con valori negativi (perdite, cassa netta) la percentuale è fuorviante
+        if c is None or p is None or p <= 0 or c < 0:
+            return "—"
+        return fmt_pct((c - p) / abs(p) * 100, 1, segno=True)
+
+    righe = []
+    def riga(etichetta, c, p):
+        righe.append((etichetta, _fmt(c) if c is not None else "N/D",
+                      _fmt(p) if p is not None else "N/D", variazione(c, p)))
+
+    for etichetta, sezione, campo in [
+        ("Ricavi", fin, "ricavi"), ("EBITDA", fin, "ebitda"), (None, None, "margine"),
+        ("EBIT", fin, "ebit"), ("Utile Netto", fin, "utile_netto"),
+        ("Totale Attivo", fin, "totale_attivo"), ("Patrimonio Netto", fin, "patrimonio_netto"),
+        ("Cassa", fin, "cassa"), ("Indebitamento Totale", deb, "indebitamento_totale"),
+        ("Debito Bancario", deb, "debito_bancario"), ("Obbligazioni", deb, "obbligazioni"),
+        ("Debito Netto", deb, "debito_netto"), (None, None, "leva"),
+    ]:
+        if campo == "margine":
+            def m(e, r):
+                return e / r * 100 if e is not None and r else None
+            mc, mp = m(num(fin.get("ebitda")), num(fin.get("ricavi"))), m(num(prec.get("ebitda")), num(prec.get("ricavi")))
+            delta = "—"
+            if mc is not None and mp is not None:
+                delta = ("+" if mc - mp > 0 else "") + _dec(mc - mp, 1) + " pp"
+            righe.append(("Margine EBITDA", fmt_pct(mc) if mc is not None else "N/D",
+                          fmt_pct(mp) if mp is not None else "N/D", delta))
+        elif campo == "leva":
+            def l(d, e):
+                return d / e if d is not None and e and e > 0 and d > 0 else None
+            lc = num(deb.get("leva_finanziaria"))
+            lp = l(num(prec.get("debito_netto")), num(prec.get("ebitda")))
+            righe.append(("Leva (PFN/EBITDA)", _dec(lc, 2) + "x" if lc is not None else "N/D",
+                          _dec(lp, 2) + "x" if lp is not None else "n.s.", "—"))
+        else:
+            riga(etichetta, num(sezione.get(campo)), num(prec.get(campo)))
+    return righe
+
+
+def anno_precedente(report: dict, anno_corrente: str = "") -> str:
+    prec = report.get("dati_anno_precedente") or {}
+    if str(prec.get("anno") or "").strip():
+        return str(prec["anno"]).strip()
+    try:
+        return str(int(str(anno_corrente)[:4]) - 1)
+    except (TypeError, ValueError):
+        return "Esercizio precedente"
+
+
+def voci_note(testo) -> list:
+    """Le note sul debito sono voci separate da " | "."""
+    if testo in (None, "", "N/D"):
+        return []
+    return [v.strip() for v in str(testo).split(" | ") if v.strip()]
 
 
 def fmt_kpi(report: dict, campo: str, sezione: str = "dati_finanziari") -> str:
@@ -493,7 +591,7 @@ def fmt_leva(debito: dict) -> str:
     if v in (None, "", "N/D"):
         return "N/D"
     try:
-        return f"{float(v):.2f}x"
+        return _dec(float(v), 2) + "x"
     except (TypeError, ValueError):
         return str(v)
 
@@ -827,8 +925,16 @@ def genera_excel(reports: list) -> bytes:
                     fg=HL_VERDE, border=True)
         _cell_style(ws, 3, 2, "Valore (EUR)", bold=True, bg=HL_GRIGIO_S,
                     fg=HL_VERDE, align="right", border=True)
-        _cell_style(ws, 3, 3, "Note", bold=True, bg=HL_GRIGIO_S,
-                    fg=HL_VERDE, border=True)
+        prec_xl = report.get("dati_anno_precedente") or {}
+        ha_prec = bool(prec_xl.get("_normalizzato"))
+        titolo_prec = f"{anno_precedente(report, r['anno'])} (EUR)" if ha_prec else "Note"
+        chiavi_xl = {"Ricavi": "ricavi", "EBITDA": "ebitda", "EBIT": "ebit", "Utile Netto": "utile_netto",
+                     "Ammortamenti": "ammortamenti", "Totale Attivo": "totale_attivo",
+                     "Patrimonio Netto": "patrimonio_netto", "Cassa": "cassa",
+                     "Indebitamento Totale": "indebitamento_totale", "Debito Bancario": "debito_bancario",
+                     "Obbligazioni": "obbligazioni", "Debito Netto": "debito_netto"}
+        _cell_style(ws, 3, 3, titolo_prec, bold=True, bg=HL_GRIGIO_S,
+                    fg=HL_VERDE, align="right" if ha_prec else "left", border=True)
 
         fin_campi = [
             ("Ricavi",            fin.get("ricavi")),
@@ -853,10 +959,11 @@ def genera_excel(reports: list) -> bytes:
                     pass
             _cell_style(ws, row, 2, num, bg=bg, fg=HL_BIANCO,
                         align="right", border=True, num_format="€ #,##0")
-            nota = ""
-            if label == "Unità originale":
-                nota = fin.get("_unita_originale", "")
-            _cell_style(ws, row, 3, nota, bg=bg, fg="999999", border=True)
+            if ha_prec:
+                _cell_style(ws, row, 3, prec_xl.get(chiavi_xl.get(label)), bg=bg, fg=HL_BIANCO,
+                            align="right", border=True, num_format="€ #,##0")
+            else:
+                _cell_style(ws, row, 3, "", bg=bg, fg="999999", border=True)
 
         # Sezione Struttura Debito
         deb_start = 4 + len(fin_campi) + 2
@@ -864,8 +971,8 @@ def genera_excel(reports: list) -> bytes:
                     bg=HL_GRIGIO_S, fg=HL_VERDE, border=True)
         _cell_style(ws, deb_start, 2, "Valore (EUR)", bold=True,
                     bg=HL_GRIGIO_S, fg=HL_VERDE, align="right", border=True)
-        _cell_style(ws, deb_start, 3, "Note", bold=True, bg=HL_GRIGIO_S,
-                    fg=HL_VERDE, border=True)
+        _cell_style(ws, deb_start, 3, titolo_prec, bold=True, bg=HL_GRIGIO_S,
+                    fg=HL_VERDE, align="right" if ha_prec else "left", border=True)
 
         deb_campi = [
             ("Indebitamento Totale", debito.get("indebitamento_totale")),
@@ -888,7 +995,11 @@ def genera_excel(reports: list) -> bytes:
             fmt = "0.0" if label == "Leva Finanziaria" else "€ #,##0"
             _cell_style(ws, row, 2, num, bg=bg, fg=HL_BIANCO,
                         align="right", border=True, num_format=fmt)
-            _cell_style(ws, row, 3, "", bg=bg, fg="999999", border=True)
+            if ha_prec and label in chiavi_xl:
+                _cell_style(ws, row, 3, prec_xl.get(chiavi_xl[label]), bg=bg, fg=HL_BIANCO,
+                            align="right", border=True, num_format="€ #,##0")
+            else:
+                _cell_style(ws, row, 3, "", bg=bg, fg="999999", border=True)
 
         # Sezione testi
         testi_start = deb_start + len(deb_campi) + 2
@@ -1003,37 +1114,63 @@ def genera_word(reports: list) -> bytes:
         p.paragraph_format.space_after  = Pt(4)
         return p
 
+    def _scrivi_cella(cella, testo, grassetto=False, dimensione=10, grigio=False):
+        """Scrive il testo nella cella; una lista diventa un elenco di voci."""
+        voci = testo if isinstance(testo, list) else [testo]
+        for n, voce in enumerate(voci):
+            paragrafo = cella.paragraphs[0] if n == 0 else cella.add_paragraph()
+            run = paragrafo.add_run(("• " if len(voci) > 1 else "") + str(voce))
+            run.font.size = Pt(dimensione)
+            run.font.bold = grassetto
+            if grigio:
+                run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+            paragrafo.paragraph_format.space_after = Pt(2 if len(voci) > 1 else 0)
+
     def add_kpi_table(doc, kpi_list):
-        """Aggiunge una tabella KPI a due colonne (label | valore)."""
+        """Tabella a due colonne (dato | valore). Un valore lista diventa un elenco puntato."""
         table = doc.add_table(rows=0, cols=2)
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.LEFT
-
-        # Larghezze colonne
-        for col_idx, width in enumerate([Cm(6), Cm(10)]):
-            for cell in table.columns[col_idx].cells:
-                cell.width = width
-
+        table.autofit = False
         for label, value in kpi_list:
             row = table.add_row()
-            # Label
-            lc = row.cells[0]
-            lc.text = label
-            lc.paragraphs[0].runs[0].font.bold = True
-            lc.paragraphs[0].runs[0].font.size = Pt(9)
-            lc.paragraphs[0].runs[0].font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+            _scrivi_cella(row.cells[0], label, grassetto=True, dimensione=9, grigio=True)
+            if isinstance(value, list):
+                _scrivi_cella(row.cells[1], value, dimensione=9)
+            else:
+                lungo = len(str(value)) > 60
+                _scrivi_cella(row.cells[1], str(value) if value is not None else "N/D",
+                              grassetto=not lungo, dimensione=9 if lungo else 10)
+            row.cells[0].width, row.cells[1].width = Cm(5), Cm(11)
+        return table
 
-            # Valore
-            vc = row.cells[1]
-            vc.text = str(value) if value is not None else "N/D"
-            vc.paragraphs[0].runs[0].font.size = Pt(10)
-            vc.paragraphs[0].runs[0].font.bold = True
+    def add_confronto_table(doc, righe, anno_corrente, anno_prec):
+        """Tabella a quattro colonne: dato | esercizio | esercizio precedente | variazione."""
+        table = doc.add_table(rows=1, cols=4)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+        table.autofit = False
+        larghezze = [Cm(5), Cm(4), Cm(4), Cm(3)]
+        for c, titolo in enumerate(["", str(anno_corrente), str(anno_prec), "Variazione"]):
+            _scrivi_cella(table.rows[0].cells[c], titolo, grassetto=True, dimensione=9, grigio=True)
+            table.rows[0].cells[c].width = larghezze[c]
+        for etichetta, corrente, precedente, variazione in righe:
+            celle = table.add_row().cells
+            _scrivi_cella(celle[0], etichetta, grassetto=True, dimensione=9, grigio=True)
+            _scrivi_cella(celle[1], corrente, grassetto=True, dimensione=10)
+            _scrivi_cella(celle[2], precedente, dimensione=10)
+            _scrivi_cella(celle[3], variazione, dimensione=9)
+            for c in range(4):
+                celle[c].width = larghezze[c]
         return table
 
     for idx, r in enumerate(reports):
         report = r["report"]
+        imposta_formato(report)
         fin    = report.get("dati_finanziari", {})
         debito = report.get("struttura_debito", {})
+        righe_cfr = confronto_esercizi(report)
+        indice_debito = next((i for i, x in enumerate(righe_cfr) if x[0] == "Indebitamento Totale"), len(righe_cfr))
 
         # ── Copertina sezione ────────────────────────────────────────────────
         if idx > 0:
@@ -1078,7 +1215,7 @@ def genera_word(reports: list) -> bytes:
         kpi_fin = [
             ("Ricavi",            _fmt(fin.get("ricavi"))),
             ("EBITDA",            _fmt(fin.get("ebitda"))),
-            ("Margine EBITDA",    f"{float(fin['ebitda'])/float(fin['ricavi'])*100:.1f}%"
+            ("Margine EBITDA",    fmt_pct(float(fin['ebitda'])/float(fin['ricavi'])*100)
                                   if fin.get("ebitda") and fin.get("ricavi") else "N/D"),
             ("EBIT",              _fmt(fin.get("ebit"))),
             ("Utile Netto",       _fmt(fin.get("utile_netto"))),
@@ -1086,7 +1223,10 @@ def genera_word(reports: list) -> bytes:
             ("Patrimonio Netto",  _fmt(fin.get("patrimonio_netto"))),
             ("Cassa",             _fmt(fin.get("cassa"))),
         ]
-        add_kpi_table(doc, kpi_fin)
+        if righe_cfr:
+            add_confronto_table(doc, righe_cfr[:indice_debito], r["anno"], anno_precedente(report, r["anno"]))
+        else:
+            add_kpi_table(doc, kpi_fin)
 
         # ── Struttura debito ──────────────────────────────────────────────────
         add_heading("Struttura del Debito", level=2)
@@ -1098,9 +1238,16 @@ def genera_word(reports: list) -> bytes:
             ("Leva Finanziaria (PFN/EBITDA)", fmt_leva(debito)),
             ("Scadenze",             debito.get("scadenze_principali", "N/D") or "N/D"),
         ]
-        if isinstance(debito, dict) and debito.get("note") not in (None, "", "N/D"):
-            kpi_deb.append(("Note", debito.get("note")))
-        add_kpi_table(doc, kpi_deb)
+        testi_debito = [("Scadenze", debito.get("scadenze_principali", "N/D") or "N/D")] \
+            if isinstance(debito, dict) else []
+        if isinstance(debito, dict) and voci_note(debito.get("note")):
+            testi_debito.append(("Note", voci_note(debito.get("note"))))
+        if righe_cfr:
+            add_confronto_table(doc, righe_cfr[indice_debito:], r["anno"], anno_precedente(report, r["anno"]))
+            doc.add_paragraph().paragraph_format.space_after = Pt(0)
+            add_kpi_table(doc, testi_debito)
+        else:
+            add_kpi_table(doc, kpi_deb[:-1] + testi_debito)
 
         # ── Sezioni testuali ──────────────────────────────────────────────────
         for label, campo in [
@@ -1146,6 +1293,10 @@ def genera_word(reports: list) -> bytes:
                         p = doc.add_paragraph(riga)
                         p.runs[0].font.size = Pt(10)
                         p.paragraph_format.space_after = Pt(4)
+                        for passaggio in o.get("passaggi") or []:
+                            pb = doc.add_paragraph(style="List Bullet")
+                            pb.add_run(str(passaggio)).font.size = Pt(9)
+                            pb.paragraph_format.space_after = Pt(1)
                 continue
 
             if testo and testo != "N/D":
@@ -1301,7 +1452,16 @@ st.markdown("---")
 
 if st.session_state["pagina"] == "genera":
 
-    lingua = st.radio("🌐 Lingua del report", ["Italiano", "English"], horizontal=True)
+    col_l1, col_l2 = st.columns(2)
+    with col_l1:
+        lingua = st.radio("🌐 Lingua del report", ["Italiano", "English"], horizontal=True)
+    with col_l2:
+        dettaglio_scelto = st.radio(
+            "📏 Livello di dettaglio", list(be.DETTAGLI.keys()),
+            format_func=lambda k: be.DETTAGLI[k], horizontal=True, key="opt_dettaglio",
+            help="Sintetico: report di circa due pagine con l'essenziale. "
+                 "Completo: tutte le informazioni trovate nei documenti.",
+        )
 
     # ── SEZIONE BILANCI (multi-upload) ────────────────────────────────────────
 
@@ -1673,11 +1833,13 @@ if st.session_state["pagina"] == "genera":
                         fonti_supplementari=list(testi_supplementari.keys()),
                         perimetro=perimetro_scelto,
                         verifica=verifica_attiva,
+                        dettaglio=dettaglio_scelto,
                         on_evento=lambda msg, stato=stato: stato.info(msg),
                     )
 
                     # Normalizza KPI a euro interi, calcola la leva e valida
                     report = normalizza_kpi(report)
+                    be.normalizza_precedente(report)
                     be.completa_leva(report)
                     report["_validation_warnings"] = valida_kpi(report) + be.controlli_fonti(report)
 
@@ -1785,6 +1947,7 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
             report = item_r["report"]
             nome_r = item_r["nome"]
             anno_r = item_r["anno"]
+            imposta_formato(report)
             fin = report.get("dati_finanziari", {})
 
             st.markdown(f"## 📋 {nome_r} — {anno_r}")
@@ -1800,7 +1963,7 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
             margine_str = "N/D"
             if r_val and e_val and report.get("_normalizzato"):
                 try:
-                    margine_str = f"{float(e_val)/float(r_val)*100:.1f}%"
+                    margine_str = fmt_pct(float(e_val)/float(r_val)*100)
                 except:
                     pass
 
@@ -1815,6 +1978,16 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
                 <div class="kpi-card"><div class="kpi-label">Anno Rif.</div><div class="kpi-value">{fin.get('anno_riferimento','N/D')}</div></div>
             </div>
             """, unsafe_allow_html=True)
+
+
+            righe_cfr = confronto_esercizi(report)
+            if righe_cfr:
+                with st.expander(f"📈 Confronto con l'esercizio precedente ({anno_precedente(report, anno_r)})", expanded=True):
+                    st.dataframe(
+                        [{"Dato": e, str(anno_r or "Corrente"): c, anno_precedente(report, anno_r): p, "Variazione": v}
+                         for e, c, p, v in righe_cfr],
+                        hide_index=True, use_container_width=True,
+                    )
 
             with st.expander("🏢 Overview", expanded=True):
                 st.markdown(f'<div class="section-box"><div class="section-title">Overview</div><div class="section-text">{report.get("overview","N/D")}</div></div>', unsafe_allow_html=True)
@@ -1837,8 +2010,10 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
                     """, unsafe_allow_html=True)
                     if debito.get('scadenze_principali', 'N/D') != 'N/D':
                         st.markdown(f'<div class="section-box"><div class="section-title">Scadenze Principali</div><div class="section-text">{debito.get("scadenze_principali","N/D")}</div></div>', unsafe_allow_html=True)
-                    if debito.get('note', 'N/D') != 'N/D':
-                        st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{debito.get("note","N/D")}</div></div>', unsafe_allow_html=True)
+                    if voci_note(debito.get('note')):
+                        st.markdown('<div class="section-box"><div class="section-title">Note</div><div class="section-text">'
+                                    + "".join(f"• {html.escape(v)}<br>" for v in voci_note(debito.get('note')))
+                                    + '</div></div>', unsafe_allow_html=True)
                 else:
                     st.markdown(f'<div class="section-box"><div class="section-text">{debito}</div></div>', unsafe_allow_html=True)
 
@@ -1869,6 +2044,7 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
                             <span class="ma-anno">{op.get('anno','')}</span>
                             <div class="ma-tipo">{op.get('tipo','')}</div>
                             <div class="ma-desc">{op.get('descrizione','')}</div>
+                            {('<div class="ma-desc" style="margin-top:6px;font-size:13px;">' + ''.join('• ' + html.escape(str(x)) + '<br>' for x in (op.get('passaggi') or [])) + '</div>') if op.get('passaggi') else ''}
                             {('<div class="ma-tipo">Fonte: ' + html.escape(str(op.get('fonte'))) + '</div>') if op.get('fonte') else ''}
                         </div>""", unsafe_allow_html=True)
                 else:
@@ -1931,6 +2107,7 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
     # Compatibilità con singolo report (aperto dall'archivio o caso B)
     elif "report" in st.session_state and "reports_generati" not in st.session_state:
         report = st.session_state["report"]
+        imposta_formato(report)
         # Normalizza se necessario (report vecchi pre-M2)
         if not report.get("_normalizzato"):
             report = normalizza_kpi(report)
@@ -1951,7 +2128,7 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
         margine_str = "N/D"
         if r_val and e_val:
             try:
-                margine_str = f"{float(e_val)/float(r_val)*100:.1f}%"
+                margine_str = fmt_pct(float(e_val)/float(r_val)*100)
             except:
                 pass
 
@@ -1987,8 +2164,10 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
                 """, unsafe_allow_html=True)
                 if debito.get('scadenze_principali', 'N/D') not in ('N/D', '', None):
                     st.markdown(f'<div class="section-box"><div class="section-title">Scadenze Principali</div><div class="section-text">{debito.get("scadenze_principali")}</div></div>', unsafe_allow_html=True)
-                if debito.get('note', 'N/D') not in ('N/D', '', None):
-                    st.markdown(f'<div class="section-box"><div class="section-title">Note</div><div class="section-text">{debito.get("note")}</div></div>', unsafe_allow_html=True)
+                if voci_note(debito.get('note')):
+                    st.markdown('<div class="section-box"><div class="section-title">Note</div><div class="section-text">'
+                                + "".join(f"• {html.escape(v)}<br>" for v in voci_note(debito.get('note')))
+                                + '</div></div>', unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="section-box"><div class="section-text">{debito}</div></div>', unsafe_allow_html=True)
 
@@ -2019,6 +2198,7 @@ come sono scritte. Se un dato non è disponibile scrivi N/D. Non inventare dati.
                         <span class="ma-anno">{op.get('anno','')}</span>
                         <div class="ma-tipo">{op.get('tipo','')}</div>
                         <div class="ma-desc">{op.get('descrizione','')}</div>
+                            {('<div class="ma-desc" style="margin-top:6px;font-size:13px;">' + ''.join('• ' + html.escape(str(x)) + '<br>' for x in (op.get('passaggi') or [])) + '</div>') if op.get('passaggi') else ''}
                             {('<div class="ma-tipo">Fonte: ' + html.escape(str(op.get('fonte'))) + '</div>') if op.get('fonte') else ''}
                     </div>""", unsafe_allow_html=True)
             else:
