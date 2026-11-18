@@ -22,7 +22,19 @@ from docx.shared import Pt, RGBColor, Cm, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
+import importlib
 import bilancio_engine as be
+
+# Dopo un aggiornamento del codice Streamlit riesegue app.py ma può tenere in
+# memoria la versione precedente di bilancio_engine: se il file è cambiato
+# rispetto a quello caricato, lo si ricarica.
+try:
+    _mtime_engine = os.path.getmtime(be.__file__)
+    if getattr(be, "_mtime_caricato", None) != _mtime_engine:
+        be = importlib.reload(be)
+        be._mtime_caricato = _mtime_engine
+except Exception:
+    pass
 
 
 class datetime(_datetime):
